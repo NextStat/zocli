@@ -21,12 +21,12 @@ struct PromptDefinition {
 const SHARED_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "goal",
-        description: "What you want to achieve with zocli.",
+        description: "What you want to achieve with zocli. Что вы хотите сделать через zocli.",
         required: false,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias to prefer.",
+        description: "Optional zocli account alias to prefer. Необязательный alias аккаунта zocli.",
         required: false,
     },
 ];
@@ -34,17 +34,17 @@ const SHARED_ARGUMENTS: &[PromptArgument] = &[
 const MAIL_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "request",
-        description: "What mail task to perform.",
+        description: "What mail task to perform. Какую почтовую задачу нужно выполнить.",
         required: true,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "folder",
-        description: "Mailbox folder, defaults to INBOX when omitted.",
+        description: "Mailbox folder, defaults to INBOX when omitted. Папка почты; если не указана, используется INBOX.",
         required: false,
     },
 ];
@@ -52,27 +52,27 @@ const MAIL_ARGUMENTS: &[PromptArgument] = &[
 const CALENDAR_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "request",
-        description: "What calendar task to perform.",
+        description: "What calendar task to perform. Какую задачу по календарю нужно выполнить.",
         required: true,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "calendar",
-        description: "Calendar name, defaults to default.",
+        description: "Calendar name, defaults to default. Имя календаря; по умолчанию используется default.",
         required: false,
     },
     PromptArgument {
         name: "from",
-        description: "Optional RFC3339 or YYYY-MM-DD start boundary.",
+        description: "Optional RFC3339 or YYYY-MM-DD start boundary. Необязательная начальная граница RFC3339 или YYYY-MM-DD.",
         required: false,
     },
     PromptArgument {
         name: "to",
-        description: "Optional RFC3339 or YYYY-MM-DD end boundary.",
+        description: "Optional RFC3339 or YYYY-MM-DD end boundary. Необязательная конечная граница RFC3339 или YYYY-MM-DD.",
         required: false,
     },
 ];
@@ -80,17 +80,17 @@ const CALENDAR_ARGUMENTS: &[PromptArgument] = &[
 const DRIVE_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "request",
-        description: "What WorkDrive task to perform.",
+        description: "What WorkDrive task to perform. Какую задачу по WorkDrive нужно выполнить.",
         required: true,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "folder_id",
-        description: "Optional WorkDrive folder ID to focus on.",
+        description: "Optional WorkDrive folder ID to focus on. Необязательный folder ID WorkDrive для фокуса.",
         required: false,
     },
 ];
@@ -98,22 +98,22 @@ const DRIVE_ARGUMENTS: &[PromptArgument] = &[
 const DAILY_BRIEFING_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "from",
-        description: "Optional start date for the schedule window.",
+        description: "Optional start date for the schedule window. Необязательная дата начала окна.",
         required: false,
     },
     PromptArgument {
         name: "to",
-        description: "Optional end date for the schedule window.",
+        description: "Optional end date for the schedule window. Необязательная дата конца окна.",
         required: false,
     },
     PromptArgument {
         name: "mail_limit",
-        description: "How many recent inbox messages to inspect.",
+        description: "How many recent inbox messages to inspect. Сколько последних писем из inbox нужно посмотреть.",
         required: false,
     },
 ];
@@ -121,17 +121,17 @@ const DAILY_BRIEFING_ARGUMENTS: &[PromptArgument] = &[
 const FIND_AND_READ_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "query",
-        description: "Search phrase to locate the email.",
+        description: "Search phrase to locate the email. Поисковая фраза для поиска письма.",
         required: true,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "limit",
-        description: "How many matching messages to inspect.",
+        description: "How many matching messages to inspect. Сколько совпавших писем нужно проверить.",
         required: false,
     },
 ];
@@ -139,27 +139,27 @@ const FIND_AND_READ_ARGUMENTS: &[PromptArgument] = &[
 const REPLY_WITH_CONTEXT_ARGUMENTS: &[PromptArgument] = &[
     PromptArgument {
         name: "message_id",
-        description: "The message ID to read and respond to.",
+        description: "The message ID to read and respond to. Идентификатор письма, которое нужно прочитать и обработать.",
         required: true,
     },
     PromptArgument {
         name: "account",
-        description: "Optional zocli account alias.",
+        description: "Optional zocli account alias. Необязательный alias аккаунта zocli.",
         required: false,
     },
     PromptArgument {
         name: "folder_id",
-        description: "Folder ID of the message when already known.",
+        description: "Folder ID of the message when already known. Folder ID письма, если он уже известен.",
         required: false,
     },
     PromptArgument {
         name: "from",
-        description: "Optional schedule start boundary to inspect.",
+        description: "Optional schedule start boundary to inspect. Необязательная начальная граница расписания.",
         required: false,
     },
     PromptArgument {
         name: "to",
-        description: "Optional schedule end boundary to inspect.",
+        description: "Optional schedule end boundary to inspect. Необязательная конечная граница расписания.",
         required: false,
     },
 ];
@@ -168,43 +168,43 @@ const PROMPTS: &[PromptDefinition] = &[
     PromptDefinition {
         name: "shared",
         title: "zocli shared context",
-        description: "Understand the account, auth state, and base MCP context before using mail, calendar, or WorkDrive tools.",
+        description: "Understand the account, auth state, and base MCP context before using mail, calendar, or WorkDrive tools. Общий контекст аккаунта, авторизации и MCP перед работой с mail, calendar и WorkDrive.",
         arguments: SHARED_ARGUMENTS,
     },
     PromptDefinition {
         name: "mail",
         title: "zocli mail workflow",
-        description: "Work with Zoho Mail through MCP: folders, search, read, send, reply, and forward.",
+        description: "Work with Zoho Mail through MCP: folders, search, read, send, reply, and forward. Работа с Zoho Mail через MCP: папки, поиск, чтение, отправка, reply и forward.",
         arguments: MAIL_ARGUMENTS,
     },
     PromptDefinition {
         name: "calendar",
         title: "zocli calendar workflow",
-        description: "Work with Zoho Calendar through MCP: calendars, upcoming events, event creation, and event deletion.",
+        description: "Work with Zoho Calendar through MCP: calendars, upcoming events, event creation, and event deletion. Работа с Zoho Calendar через MCP: календари, события, создание и удаление событий.",
         arguments: CALENDAR_ARGUMENTS,
     },
     PromptDefinition {
         name: "drive",
         title: "zocli drive workflow",
-        description: "Work with Zoho WorkDrive through MCP: teams, folders, uploads, and downloads.",
+        description: "Work with Zoho WorkDrive through MCP: teams, folders, uploads, and downloads. Работа с Zoho WorkDrive через MCP: teams, папки, загрузки и скачивания.",
         arguments: DRIVE_ARGUMENTS,
     },
     PromptDefinition {
         name: "daily-briefing",
         title: "Mail and calendar briefing",
-        description: "Build a short summary of important mail, upcoming events, deadlines, and actions that need attention.",
+        description: "Build a short summary of important mail, upcoming events, deadlines, and actions that need attention. Собери короткую сводку по важным письмам, событиям и действиям.",
         arguments: DAILY_BRIEFING_ARGUMENTS,
     },
     PromptDefinition {
         name: "find-and-read",
         title: "Find and read a message",
-        description: "Search for a message, choose the best result, and read its contents.",
+        description: "Search for a message, choose the best result, and read its contents. Найди письмо, выбери лучший результат и прочитай содержимое.",
         arguments: FIND_AND_READ_ARGUMENTS,
     },
     PromptDefinition {
         name: "reply-with-context",
         title: "Reply with calendar context",
-        description: "Read a message, inspect the schedule, and draft or send a reply with the right calendar context.",
+        description: "Read a message, inspect the schedule, and draft or send a reply with the right calendar context. Прочитай письмо, проверь расписание и подготовь ответ с правильным календарным контекстом.",
         arguments: REPLY_WITH_CONTEXT_ARGUMENTS,
     },
 ];
@@ -863,5 +863,21 @@ mod tests {
             .as_str()
             .expect("prompt text");
         assert!(text.contains("resource://zocli/skill/zocli-mail"));
+    }
+
+    #[test]
+    fn prompt_definitions_are_bilingual() {
+        let definitions = prompt_definitions();
+        for definition in definitions {
+            let description = definition["description"]
+                .as_str()
+                .expect("prompt description");
+            assert!(
+                description
+                    .chars()
+                    .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+                "prompt description is missing Cyrillic text: {description}"
+            );
+        }
     }
 }

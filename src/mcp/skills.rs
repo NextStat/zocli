@@ -256,9 +256,29 @@ mod tests {
     fn skill_content_and_description_are_available() {
         let content = skill_content("zocli-mail").expect("skill content");
         assert!(content.contains("# zocli mail"));
+        assert!(content.contains("русских запросов"));
 
         let description = skill_description("zocli-mail").expect("skill description");
         assert!(description.contains("Zoho Mail"));
+        assert!(
+            description
+                .chars()
+                .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
+        );
+    }
+
+    #[test]
+    fn every_skill_description_is_bilingual() {
+        for skill in SKILLS {
+            let description = skill_description(skill.name).expect("skill description");
+            assert!(
+                description
+                    .chars()
+                    .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+                "{}: description is missing Cyrillic text",
+                skill.name
+            );
+        }
     }
 
     #[test]

@@ -1,13 +1,18 @@
 ---
 name: zocli-reply-with-context
-description: "Reply to a message with calendar context: read the mail, inspect schedule constraints, then draft or send a reply. Use it when availability or timing matters."
+description: "Reply to a message with calendar context for English and Russian requests: read the mail, inspect schedule constraints, then draft or send a reply. Также используй для русских запросов, где важны доступность и время."
 metadata:
   author: NextStat
 ---
 
 # Reply with calendar context
 
+Use this workflow for both English and Russian requests.
+Используй этот workflow и для английских, и для русских запросов.
+
 Multi-step workflow: read, check the calendar, then reply.
+
+Multi-step workflow: прочитать письмо, проверить календарь, затем ответить.
 
 ## Steps
 
@@ -44,3 +49,4 @@ Mail: "Can you confirm the meeting on March 15 at 14:00?"
 - Thread headers are handled automatically by `mail reply`.
 - Use `--cc` or `--html` only when the reply genuinely needs them.
 - State explicitly whether you actually sent the reply or only drafted one.
+- If the user writes in Russian, the draft or explanation should also be in Russian unless they ask otherwise.

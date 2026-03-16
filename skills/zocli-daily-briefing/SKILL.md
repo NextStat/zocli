@@ -1,13 +1,18 @@
 ---
 name: zocli-daily-briefing
-description: "Summarize recent mail and the upcoming schedule for one account. Use it for a morning brief, a weekly digest, or a quick status check before replying."
+description: "Summarize recent mail and the upcoming schedule for one account. Works for English and Russian requests: morning brief, weekly digest, or a quick status check. Также используй для русских запросов на ежедневную сводку."
 metadata:
   author: NextStat
 ---
 
 # Daily briefing
 
+Use this workflow for both English and Russian briefing requests.
+Используй этот workflow и для английских, и для русских запросов на сводку.
+
 This is a multi-step workflow for summarizing inbox activity and calendar events for a chosen period.
+
+Это multi-step workflow для сводки по inbox и событиям календаря за выбранный период.
 
 ## Steps
 
@@ -41,6 +46,7 @@ Typical signals: urgent subjects, replies to your messages, calendar-related thr
    - new or unread mail worth attention;
    - the next important events;
    - anything that requires a reply, follow-up, or scheduling action.
+6. Match the user's language in the final summary. If the user writes in Russian, the summary should also be in Russian.
 
 ## Notes
 
