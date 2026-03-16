@@ -740,6 +740,127 @@ fn mcp_install_writes_skills_to_claude_directory() {
 }
 
 #[test]
+fn mcp_install_claude_migrates_legacy_yacli_config_and_skills() {
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path();
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+
+    let log_path = home.join("claude.log");
+    write_logging_command(&bin_dir.join("claude"), &log_path, true);
+
+    write_file(
+        &home.join(".claude.json"),
+        r#"{
+  "mcpServers": {
+    "yacli": {
+      "type": "stdio",
+      "command": "/tmp/yacli",
+      "args": ["mcp"]
+    }
+  },
+  "projects": {
+    "/tmp/project": {
+      "mcpServers": {
+        "yacli": {
+          "type": "stdio",
+          "command": "/tmp/yacli",
+          "args": ["mcp"]
+        }
+      }
+    }
+  }
+}"#,
+    );
+
+    write_file(
+        &home.join(".claude/skills/yacli-mail/SKILL.md"),
+        "legacy mail",
+    );
+    write_file(
+        &home.join(".claude/skills/yacli-shared/SKILL.md"),
+        "legacy shared",
+    );
+
+    let output = zocli()
+        .env("HOME", home)
+        .env("PATH", prepend_path(&bin_dir))
+        .args(["mcp", "install", "--client", "claude"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).expect("valid json");
+    let claude_item = report["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["client"] == "claude")
+        .expect("claude item");
+    assert_eq!(claude_item["status"], "installed");
+
+    let installed: Value =
+        serde_json::from_slice(&fs::read(home.join(".claude.json")).expect("claude config"))
+            .expect("json");
+    assert!(installed["mcpServers"].get("yacli").is_none());
+    assert!(
+        installed["projects"]["/tmp/project"]["mcpServers"]
+            .get("yacli")
+            .is_none()
+    );
+    assert_eq!(installed["mcpServers"]["zocli"]["type"], "stdio");
+    assert_eq!(installed["mcpServers"]["zocli"]["args"][0], "mcp");
+
+    let skills_dir = home.join(".claude/skills");
+    assert!(!skills_dir.join("yacli-mail").exists());
+    assert!(!skills_dir.join("yacli-shared").exists());
+    assert!(skills_dir.join("zocli-mail/SKILL.md").exists());
+    assert!(skills_dir.join("zocli-shared/SKILL.md").exists());
+}
+
+#[test]
+fn mcp_install_claude_desktop_removes_legacy_yacli_server() {
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path();
+    let desktop_path = claude_desktop_config_path(home);
+    write_file(
+        &desktop_path,
+        r#"{
+  "mcpServers": {
+    "yacli": {
+      "command": "/tmp/yacli",
+      "args": ["mcp"]
+    },
+    "existing": {
+      "command": "node",
+      "args": ["desktop.js"]
+    }
+  }
+}"#,
+    );
+
+    let output = zocli()
+        .env("HOME", home)
+        .args(["mcp", "install", "--client", "claude-desktop"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).expect("json report");
+    assert_eq!(report["items"][0]["status"], "installed");
+
+    let installed: Value =
+        serde_json::from_slice(&fs::read(&desktop_path).expect("desktop config")).expect("json");
+    assert!(installed["mcpServers"].get("yacli").is_none());
+    assert_eq!(installed["mcpServers"]["existing"]["command"], "node");
+    assert_eq!(installed["mcpServers"]["zocli"]["args"][0], "mcp");
+}
+
+#[test]
 fn mcp_install_skips_skills_for_zed() {
     let temp = tempdir().expect("tempdir");
     let home = temp.path();

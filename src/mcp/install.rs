@@ -17,6 +17,7 @@ use crate::output::RenderedOutput;
 use super::skills;
 
 const SERVER_NAME: &str = "zocli";
+const LEGACY_SERVER_NAMES: &[&str] = &["yacli"];
 
 #[derive(Clone, Debug)]
 struct ServerRegistration {
@@ -56,6 +57,12 @@ struct InstallItem {
     skills_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skills_count: Option<usize>,
+}
+
+#[derive(Debug)]
+struct ReconcileOutcome {
+    changed: bool,
+    backup_path: Option<String>,
 }
 
 pub fn execute_install(
@@ -158,6 +165,50 @@ fn install_client_skills(client: InstallClient, item: &mut InstallItem) {
     }
 }
 
+fn reconcile_post_install(
+    client: InstallClient,
+    registration: &ServerRegistration,
+    item: &mut InstallItem,
+) -> Result<()> {
+    match client {
+        InstallClient::Claude => {
+            let path = claude_native_config_path()?;
+            let outcome = reconcile_claude_native_config(&path, registration)?;
+            item.path = Some(path.display().to_string());
+            if outcome.changed {
+                item.backup_path = outcome.backup_path;
+                if item.status == "already_installed" {
+                    item.status = "installed";
+                }
+                item.detail = format!(
+                    "{}; migrated legacy Claude MCP entries in {}",
+                    item.detail,
+                    path.display()
+                );
+            }
+        }
+        InstallClient::ClaudeDesktop => {
+            let path = claude_desktop_config_path()?;
+            let outcome =
+                reconcile_json_config_legacy_servers(&path, &[], "mcpServers", registration)?;
+            if outcome.changed {
+                item.path = Some(path.display().to_string());
+                item.backup_path = outcome.backup_path;
+                if item.status == "already_installed" {
+                    item.status = "installed";
+                }
+                item.detail = format!(
+                    "{}; removed legacy yacli entries from {}",
+                    item.detail,
+                    path.display()
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn resolve_clients(selected: Vec<McpClientArg>) -> Vec<InstallClient> {
     let mut clients = BTreeSet::new();
     if selected.is_empty() {
@@ -196,7 +247,7 @@ fn install_client(client: InstallClient, registration: &ServerRegistration) -> R
         ));
     }
 
-    match client {
+    let mut item = match client {
         InstallClient::Claude => install_native_get_add(
             client,
             "claude",
@@ -252,7 +303,10 @@ fn install_client(client: InstallClient, registration: &ServerRegistration) -> R
             "context_servers",
             registration,
         ),
-    }
+    }?;
+
+    reconcile_post_install(client, registration, &mut item)?;
+    Ok(item)
 }
 
 fn canonical_registration(
@@ -419,7 +473,9 @@ fn install_json_file(
     )?;
 
     let desired = json_server_entry(registration);
+    let removed_legacy = remove_legacy_server_entries(container);
     let requires_write = source_path != path
+        || removed_legacy
         || !matches!(container.get(SERVER_NAME), Some(current) if *current == desired);
     let status = if requires_write {
         container.insert(SERVER_NAME.to_string(), desired);
@@ -459,6 +515,90 @@ fn install_json_file(
         backup_path,
         skills_path: None,
         skills_count: None,
+    })
+}
+
+fn reconcile_claude_native_config(
+    path: &Path,
+    registration: &ServerRegistration,
+) -> Result<ReconcileOutcome> {
+    let source_path = existing_config_path(path, &[]).unwrap_or_else(|| path.to_path_buf());
+    let (mut root, existed) = load_json_object(&source_path)?;
+    let root_object = root.as_object_mut().ok_or_else(|| {
+        ZocliError::Serialization(format!(
+            "Claude config root must be a JSON object: {}",
+            source_path.display()
+        ))
+    })?;
+
+    let mut changed = remove_legacy_servers_recursive(root_object);
+    let mcp_servers = ensure_object(root_object, "mcpServers")?;
+    let desired = claude_json_server_entry(registration);
+    if !matches!(mcp_servers.get(SERVER_NAME), Some(current) if *current == desired) {
+        mcp_servers.insert(SERVER_NAME.to_string(), desired);
+        changed = true;
+    }
+
+    if !changed && source_path == path {
+        return Ok(ReconcileOutcome {
+            changed: false,
+            backup_path: None,
+        });
+    }
+
+    let mut backup_path = None;
+    if existed {
+        backup_path = Some(write_backup(&source_path)?);
+    } else if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_json_atomic(path, &root)?;
+    Ok(ReconcileOutcome {
+        changed: true,
+        backup_path,
+    })
+}
+
+fn reconcile_json_config_legacy_servers(
+    path: &Path,
+    fallback_paths: &[PathBuf],
+    top_level_key: &str,
+    registration: &ServerRegistration,
+) -> Result<ReconcileOutcome> {
+    let source_path =
+        existing_config_path(path, fallback_paths).unwrap_or_else(|| path.to_path_buf());
+    let (mut root, existed) = load_json_object(&source_path)?;
+    let container = ensure_object(
+        root.as_object_mut().ok_or_else(|| {
+            ZocliError::Serialization(format!(
+                "config root must be a JSON object: {}",
+                source_path.display()
+            ))
+        })?,
+        top_level_key,
+    )?;
+    let removed_legacy = remove_legacy_server_entries(container);
+    let desired = json_server_entry(registration);
+    let changed = removed_legacy
+        || !matches!(container.get(SERVER_NAME), Some(current) if *current == desired);
+    if !changed && source_path == path {
+        return Ok(ReconcileOutcome {
+            changed: false,
+            backup_path: None,
+        });
+    }
+
+    container.insert(SERVER_NAME.to_string(), desired);
+    let mut backup_path = None;
+    if existed {
+        backup_path = Some(write_backup(&source_path)?);
+    } else if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_json_atomic(path, &root)?;
+    Ok(ReconcileOutcome {
+        changed: true,
+        backup_path,
     })
 }
 
@@ -533,6 +673,54 @@ fn json_server_entry(registration: &ServerRegistration) -> Value {
     }
 
     Value::Object(entry)
+}
+
+fn claude_json_server_entry(registration: &ServerRegistration) -> Value {
+    let mut entry = json_server_entry(registration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    entry.insert(
+        "type".to_string(),
+        Value::String(match registration.transport {
+            McpTransportArg::Stdio => "stdio".to_string(),
+            McpTransportArg::Http => "http".to_string(),
+        }),
+    );
+    Value::Object(entry)
+}
+
+fn remove_legacy_server_entries(container: &mut Map<String, Value>) -> bool {
+    let before = container.len();
+    container.retain(|key, _| !LEGACY_SERVER_NAMES.contains(&key.as_str()));
+    container.len() != before
+}
+
+fn remove_legacy_servers_recursive(object: &mut Map<String, Value>) -> bool {
+    let mut changed = false;
+    for (key, value) in object.iter_mut() {
+        if matches!(key.as_str(), "mcpServers" | "context_servers")
+            && let Some(container) = value.as_object_mut()
+            && remove_legacy_server_entries(container)
+        {
+            changed = true;
+        }
+
+        if let Some(child) = value.as_object_mut()
+            && remove_legacy_servers_recursive(child)
+        {
+            changed = true;
+        } else if let Some(items) = value.as_array_mut() {
+            for item in items {
+                if let Some(child) = item.as_object_mut()
+                    && remove_legacy_servers_recursive(child)
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 fn write_backup(path: &Path) -> Result<String> {
@@ -726,6 +914,10 @@ fn claude_desktop_config_path() -> Result<PathBuf> {
     } else {
         Ok(home.join(".config/Claude/claude_desktop_config.json"))
     }
+}
+
+fn claude_native_config_path() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".claude.json"))
 }
 
 fn windsurf_config_path() -> Result<PathBuf> {
