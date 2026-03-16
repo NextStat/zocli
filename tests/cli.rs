@@ -233,6 +233,8 @@ fn simple_add_without_client_id_or_shared_default_fails_cleanly() {
     let temp = tempdir().expect("tempdir");
 
     zocli()
+        .env_remove("ZOCLI_DEFAULT_CLIENT_ID")
+        .env_remove("ZOCLI_DEFAULT_CLIENT_SECRET")
         .env("ZOCLI_CONFIG_DIR", temp.path())
         .args(["add", "me@zoho.com"])
         .assert()
