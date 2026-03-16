@@ -229,19 +229,25 @@ fn simple_add_uses_shared_default_oauth_client_when_client_id_is_omitted() {
 }
 
 #[test]
-fn simple_add_without_client_id_or_shared_default_fails_cleanly() {
+fn simple_add_without_client_id_behaves_consistently_with_shared_default_configuration() {
     let temp = tempdir().expect("tempdir");
 
-    zocli()
+    let assert = zocli()
         .env_remove("ZOCLI_DEFAULT_CLIENT_ID")
         .env_remove("ZOCLI_DEFAULT_CLIENT_SECRET")
         .env("ZOCLI_CONFIG_DIR", temp.path())
         .args(["add", "me@zoho.com"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("shared default OAuth client").or(
+        .assert();
+
+    if option_env!("ZOCLI_DEFAULT_CLIENT_ID").is_some() {
+        assert
+            .success()
+            .stdout(predicate::str::contains("\"operation\":\"account.add\""));
+    } else {
+        assert.failure().stderr(predicate::str::contains("shared default OAuth client").or(
             predicate::str::contains("client_id must not be empty"),
         ));
+    }
 }
 
 // ============================================================================
