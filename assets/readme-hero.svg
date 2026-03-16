@@ -25,7 +25,7 @@
 
   <rect x="92" y="92" width="210" height="46" rx="23" fill="#15203C"/>
   <circle cx="126" cy="115" r="10" fill="url(#accent)"/>
-  <text x="150" y="124" fill="#F8FAFC" font-family="SF Pro Display, Inter, Arial, sans-serif" font-size="28" font-weight="700">CLI + MCP + Apps</text>
+  <text x="150" y="124" fill="#F8FAFC" font-family="SF Pro Display, Inter, Arial, sans-serif" font-size="28" font-weight="700">CLI + MCP Apps</text>
 
   <text x="92" y="232" fill="#F8FAFC" font-family="SF Pro Display, Inter, Arial, sans-serif" font-size="118" font-weight="900">zocli</text>
   <text x="92" y="296" fill="#B9C5E3" font-family="SF Pro Display, Inter, Arial, sans-serif" font-size="40" font-weight="700">Zoho Mail, Calendar, WorkDrive</text>
