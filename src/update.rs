@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 use reqwest::Url;
 use reqwest::blocking::Client;
+use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -69,11 +70,7 @@ pub fn execute_update(
         return render_output(format, &report);
     }
 
-    if plan
-        .resolved_version
-        .as_deref()
-        .is_some_and(|version| version == current_version)
-    {
+    if !has_newer_release(&current_version, plan.resolved_version.as_deref()) {
         let report = build_update_report(
             "update.apply",
             &current_version,
@@ -107,6 +104,14 @@ pub fn check_for_update(version: Option<&str>) -> Result<UpdateStatusReport> {
 fn release_client() -> Result<Client> {
     Client::builder()
         .user_agent(format!("zocli/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(ZocliError::from)
+}
+
+fn release_probe_client() -> Result<Client> {
+    Client::builder()
+        .user_agent(format!("zocli/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(Policy::none())
         .build()
         .map_err(ZocliError::from)
 }
@@ -183,14 +188,44 @@ fn current_release_asset() -> Result<ReleaseAsset> {
 }
 
 fn fetch_checksums(client: &Client, base_url: &str) -> Result<(String, Option<String>)> {
+    let requested_url = format!("{base_url}/SHA256SUMS");
+    let probed_version = probe_latest_version(&requested_url)?;
     let response = client
-        .get(format!("{base_url}/SHA256SUMS"))
+        .get(&requested_url)
         .send()
         .map_err(ZocliError::from)?;
     let final_url = response.url().clone();
     let response = response.error_for_status().map_err(ZocliError::from)?;
     let body = response.text().map_err(ZocliError::from)?;
-    Ok((body, version_from_download_url(&final_url)))
+    Ok((
+        body,
+        version_from_download_url(&final_url).or(probed_version),
+    ))
+}
+
+fn probe_latest_version(url: &str) -> Result<Option<String>> {
+    if !url.contains("/releases/latest/download/") {
+        return Ok(None);
+    }
+
+    let response = release_probe_client()?
+        .get(url)
+        .send()
+        .map_err(ZocliError::from)?;
+    if !response.status().is_redirection() {
+        return Ok(version_from_download_url(response.url()));
+    }
+
+    let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+        return Ok(None);
+    };
+    let location = location.to_str().map_err(|err| {
+        ZocliError::Io(format!("failed to decode release redirect location: {err}"))
+    })?;
+    let redirected_url = response.url().join(location).map_err(|err| {
+        ZocliError::Io(format!("failed to resolve release redirect location {location}: {err}"))
+    })?;
+    Ok(version_from_download_url(&redirected_url))
 }
 
 fn version_from_download_url(url: &Url) -> Option<String> {
@@ -451,8 +486,8 @@ fn build_update_report(
     explicit_status: Option<&str>,
 ) -> UpdateStatusReport {
     let status = explicit_status.unwrap_or_else(|| match plan.resolved_version.as_deref() {
-        Some(version) if version == current_version => "already_up_to_date",
-        Some(_) => "update_available",
+        Some(version) if has_newer_release(current_version, Some(version)) => "update_available",
+        Some(_) => "already_up_to_date",
         None => "check_complete",
     });
     let target_version = plan
@@ -469,6 +504,41 @@ fn build_update_report(
         target: plan.asset.target.to_string(),
         base_url: plan.base_url.clone(),
     }
+}
+
+fn has_newer_release(current_version: &str, resolved_version: Option<&str>) -> bool {
+    let Some(resolved_version) = resolved_version else {
+        return false;
+    };
+
+    match compare_versions(current_version, resolved_version) {
+        Some(std::cmp::Ordering::Less) => true,
+        Some(_) => false,
+        None => resolved_version != current_version,
+    }
+}
+
+fn compare_versions(current_version: &str, target_version: &str) -> Option<std::cmp::Ordering> {
+    let parse = |version: &str| -> Option<Vec<u64>> {
+        version
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect()
+    };
+
+    let current = parse(current_version)?;
+    let target = parse(target_version)?;
+    let max_len = current.len().max(target.len());
+    for index in 0..max_len {
+        let lhs = current.get(index).copied().unwrap_or(0);
+        let rhs = target.get(index).copied().unwrap_or(0);
+        match lhs.cmp(&rhs) {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return Some(ordering),
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 fn render_output(format: OutputFormat, report: &UpdateStatusReport) -> Result<RenderedOutput> {
@@ -546,6 +616,48 @@ mod tests {
             Url::parse("https://github.com/NextStat/zocli/releases/download/v0.2.0/SHA256SUMS")
                 .expect("url");
         assert_eq!(version_from_download_url(&url).as_deref(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn build_update_report_marks_check_as_up_to_date_when_versions_match() {
+        let asset = ReleaseAsset {
+            archive_kind: ArchiveKind::TarGz,
+            binary_name: "zocli",
+            file_name: "zocli-aarch64-apple-darwin.tar.gz",
+            target: "aarch64-apple-darwin",
+        };
+        let plan = ReleasePlan {
+            asset,
+            base_url: "https://github.com/NextStat/zocli/releases/latest/download".to_string(),
+            requested_version: "latest".to_string(),
+            resolved_version: Some("0.2.0".to_string()),
+            checksum: "deadbeef".to_string(),
+        };
+
+        let report = build_update_report("update.check", "0.2.0", &plan, None);
+        assert_eq!(report.status, "already_up_to_date");
+        assert_eq!(report.target_version, "0.2.0");
+    }
+
+    #[test]
+    fn build_update_report_does_not_offer_downgrade_when_current_is_newer() {
+        let asset = ReleaseAsset {
+            archive_kind: ArchiveKind::TarGz,
+            binary_name: "zocli",
+            file_name: "zocli-aarch64-apple-darwin.tar.gz",
+            target: "aarch64-apple-darwin",
+        };
+        let plan = ReleasePlan {
+            asset,
+            base_url: "https://github.com/NextStat/zocli/releases/latest/download".to_string(),
+            requested_version: "latest".to_string(),
+            resolved_version: Some("0.2.0".to_string()),
+            checksum: "deadbeef".to_string(),
+        };
+
+        let report = build_update_report("update.check", "0.2.1", &plan, None);
+        assert_eq!(report.status, "already_up_to_date");
+        assert_eq!(report.target_version, "0.2.0");
     }
 
     #[test]

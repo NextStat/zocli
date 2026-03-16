@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- `zocli update --check` and `zocli update` now resolve GitHub `releases/latest/download` to the concrete published version instead of reporting `target_version: "latest"`;
+- update status now reports `already_up_to_date` correctly for current binaries when the latest published release matches the installed version;
+- MCP `zocli.update.check` now inherits the same concrete version resolution path as the CLI update surface.
+
 ## 0.2.0
 
 ### Added

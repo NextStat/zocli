@@ -309,6 +309,44 @@ fn update_check_uses_release_checksum_mirror_and_reports_available_target() {
 }
 
 #[test]
+fn update_check_resolves_latest_redirect_to_concrete_version() {
+    let (asset, target) = current_release_update_target();
+    let mut server = Server::new();
+    let latest_base_url = format!("{}/releases/latest/download", server.url());
+    let versioned_checksums_path = "/releases/download/v9.9.9/SHA256SUMS";
+    let versioned_checksums_url = format!("{}{versioned_checksums_path}", server.url());
+
+    let _latest_redirect = server
+        .mock("GET", "/releases/latest/download/SHA256SUMS")
+        .with_status(302)
+        .with_header("location", &versioned_checksums_url)
+        .create();
+    let _checksums = server
+        .mock("GET", versioned_checksums_path)
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body(format!("deadbeef  {asset}\n"))
+        .create();
+
+    let output = zocli()
+        .args(["update", "--check", "--base-url", &latest_base_url])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(value["operation"], "update.check");
+    assert_eq!(value["status"], "update_available");
+    assert_eq!(value["requested_version"], "latest");
+    assert_eq!(value["target_version"], "9.9.9");
+    assert_eq!(value["asset"], asset);
+    assert_eq!(value["target"], target);
+    assert_eq!(value["base_url"], latest_base_url);
+}
+
+#[test]
 fn mail_read_help_uses_positional_message_id() {
     zocli()
         .args(["mail", "read", "--help"])

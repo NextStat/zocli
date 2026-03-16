@@ -1150,6 +1150,58 @@ fn mcp_stdio_update_check_tool_reads_release_mirror() {
 }
 
 #[test]
+fn mcp_stdio_update_check_tool_resolves_latest_redirect_version() {
+    let asset = current_release_update_target();
+    let mut server = Server::new();
+    let latest_base_url = format!("{}/releases/latest/download", server.url());
+    let versioned_checksums_path = "/releases/download/v9.9.9/SHA256SUMS";
+    let versioned_checksums_url = format!("{}{versioned_checksums_path}", server.url());
+
+    let _latest_redirect = server
+        .mock("GET", "/releases/latest/download/SHA256SUMS")
+        .with_status(302)
+        .with_header("location", &versioned_checksums_url)
+        .create();
+    let _checksums = server
+        .mock("GET", versioned_checksums_path)
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body(format!("deadbeef  {asset}\n"))
+        .create();
+
+    let input = [
+        initialize_request(false),
+        mcp_request(
+            2,
+            "tools/call",
+            json!({
+                "name": "zocli.update.check",
+                "arguments": {}
+            }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .env("ZOCLI_UPDATE_BASE_URL", &latest_base_url)
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["operation"], "update.check");
+    assert_eq!(structured["status"], "update_available");
+    assert_eq!(structured["targetVersion"], "9.9.9");
+    assert_eq!(structured["requestedVersion"], "latest");
+    assert_eq!(structured["baseUrl"], latest_base_url);
+}
+
+#[test]
 fn mcp_stdio_lists_resource_templates_and_reads_templated_resources() {
     let temp = tempdir().expect("tempdir");
     write_accounts_file(
