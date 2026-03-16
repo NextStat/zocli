@@ -23,7 +23,7 @@ use crate::mail::{
     ForwardedMail, MailFolder, MailForwardRequest, MailMessage, MailMessageSummary,
     MailReplyRequest, MailSendRequest, RepliedMail, SentMail, forward_mail_message,
     list_mail_folders, list_mail_messages, read_mail_message, reply_to_mail_message,
-    search_mail_messages, send_mail_message,
+    search_mail_messages, send_mail_message, upload_attachment,
 };
 use crate::mcp::install::execute_install;
 use crate::model::{AccountConfig, NewAccountInput};
@@ -111,9 +111,9 @@ fn execute_simple_add(
     email: String,
     name: Option<String>,
     datacenter: String,
-    account_id: String,
+    account_id: Option<String>,
     org_id: Option<String>,
-    client_id: String,
+    client_id: Option<String>,
     client_secret: Option<String>,
 ) -> Result<RenderedOutput> {
     let name = name.unwrap_or_else(|| derive_account_name_from_email(&email));
@@ -394,6 +394,13 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
             let mut account_store = AccountStore::load()?;
             let account_name = account_store.resolved_account_name(profile.as_deref())?;
             let account = account_store.get_account(&account_name)?.clone();
+            let client_id = account.oauth_client_id().ok_or_else(|| {
+                ZocliError::Config(
+                    "no OAuth client is configured for this account. Use the shared/default zocli OAuth app or re-run `zocli add --client-id ...` as an advanced override."
+                        .to_string(),
+                )
+            })?;
+            let client_secret = account.oauth_client_secret();
 
             let services = oauth_login_services(service)?;
 
@@ -402,8 +409,8 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
 
             let session = start_pkce_authorization(
                 &services,
-                &account.client_id,
-                account.client_secret.as_deref(),
+                &client_id,
+                client_secret.as_deref(),
                 &auth_base_url,
                 resolved_login_hint,
             )?;
@@ -901,6 +908,7 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
             cc,
             bcc,
             html,
+            attachments,
         } => {
             let (account_name, account, access_token) = resolve_zoho_context(profile.as_deref())?;
             let base_url = account.mail_api_url();
@@ -911,6 +919,27 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
             } else {
                 "plaintext".to_string()
             };
+
+            let uploaded = attachments
+                .iter()
+                .map(|path| {
+                    let file_path = std::path::Path::new(path);
+                    let file_name = file_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment")
+                        .to_string();
+                    let file_bytes = std::fs::read(file_path)
+                        .map_err(|e| ZocliError::Validation(format!("cannot read attachment {path}: {e}")))?;
+                    upload_attachment(
+                        &base_url,
+                        &account.account_id,
+                        &access_token,
+                        &file_name,
+                        file_bytes,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             let sent = send_mail_message(
                 &base_url,
@@ -924,6 +953,7 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                     subject: subject.clone(),
                     content,
                     mail_format,
+                    attachments: uploaded,
                 },
             )?;
 
@@ -1003,6 +1033,8 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                 &access_token,
                 MailForwardRequest {
                     message_id: message_id.clone(),
+                    folder_id: folder_id.clone(),
+                    from_address: account.email.clone(),
                     to_address: to.clone(),
                     content,
                     cc_address: cc.join(","),
@@ -1259,7 +1291,11 @@ fn all_guide_commands() -> Vec<GuideCommandEntry> {
             topic: "account",
             summary: "Add a Zoho account and set it as current.",
             requires_account: false,
-            examples: vec!["zocli add user@zoho.com --account-id 12345 --client-id 1000.XXXX"],
+            examples: vec![
+                "zocli add user@zoho.com",
+                "zocli add user@company.com --datacenter eu",
+                "zocli add user@zoho.com work",
+            ],
         },
         GuideCommandEntry {
             path: "accounts",
@@ -1436,7 +1472,7 @@ fn all_guide_workflows() -> Vec<GuideWorkflowEntry> {
             title: "Read a message from Zoho Mail",
             summary: "Full flow from account setup to reading a message by ID.",
             steps: vec![
-                "zocli add user@zoho.com --account-id 12345 --client-id 1000.XXXX",
+                "zocli add user@zoho.com",
                 "zocli login",
                 "zocli mail list --limit 10",
                 "zocli mail read <message-id> --folder-id <folder-id>",
@@ -1541,8 +1577,8 @@ fn all_guide_workflows() -> Vec<GuideWorkflowEntry> {
             title: "Work with multiple accounts",
             summary: "Independent access to multiple mailboxes via named accounts.",
             steps: vec![
-                "zocli add personal@zoho.com --account-id 11111 --client-id 1000.AAA",
-                "zocli add work@zoho.com --account-id 22222 --client-id 1000.BBB",
+                "zocli add personal@zoho.com",
+                "zocli add work@zoho.com",
                 "zocli login",
                 "zocli use work",
                 "zocli login",
@@ -1565,17 +1601,32 @@ fn render_account_table(name: &str, account: &AccountConfig, current: bool) -> S
         ("email", account.email.clone()),
         ("current", current.to_string()),
         ("datacenter", account.datacenter.clone()),
-        ("account_id", account.account_id.clone()),
+        (
+            "account_id",
+            display_account_identity(account.account_id.as_str(), "auto-discover after login"),
+        ),
         (
             "org_id",
             account.org_id.as_deref().unwrap_or("-").to_string(),
         ),
-        ("client_id", account.client_id.clone()),
+        (
+            "client_id",
+            display_account_identity(account.client_id.as_str(), "shared/default OAuth app"),
+        ),
         (
             "credential_ref",
             account.credential_ref.as_deref().unwrap_or("-").to_string(),
         ),
     ])
+}
+
+fn display_account_identity(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn render_account_validation_table(name: &str, errors: &[String]) -> String {

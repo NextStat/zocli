@@ -310,7 +310,7 @@ fn mcp_http_initialize_returns_session_header_and_supports_follow_up_requests() 
         .expect("account tool");
     assert_eq!(
         account_tool["_meta"]["ui"]["resourceUri"],
-        "ui://zocli/dashboard"
+        "ui://zocli/account"
     );
     let update_tool = tools
         .iter()
@@ -1709,4 +1709,225 @@ credential_ref = "store:oauth"
         notification["params"]["uri"],
         "resource://zocli/account/personal"
     );
+}
+
+// ── MCP Apps ui/* lifecycle tests (Phase 2) ──────────────────
+
+#[test]
+fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
+    let server = TestHttpServer::spawn();
+    let client = client();
+
+    // 1. MCP initialize with UI capability
+    let initialize = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {
+                    "extensions": {
+                        "io.modelcontextprotocol/ui": {
+                            "mimeTypes": [APP_RESOURCE_MIME_TYPE]
+                        }
+                    }
+                },
+                "clientInfo": { "name": "http-ui-test", "version": "0.1.0" }
+            }
+        }),
+        None,
+        None,
+    );
+    assert!(initialize.status().is_success());
+    let session_id = initialize
+        .headers()
+        .get("Mcp-Session-Id")
+        .expect("session header")
+        .to_str()
+        .expect("header string")
+        .to_string();
+
+    // 2. ui/initialize
+    let ui_init = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "ui/initialize",
+            "params": {}
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(ui_init.status().is_success());
+    let ui_init_payload: Value = ui_init.json().expect("ui/initialize json");
+    assert_eq!(ui_init_payload["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(ui_init_payload["result"]["serverInfo"]["name"], "zocli");
+    assert_eq!(
+        ui_init_payload["result"]["capabilities"]["tools"]["listChanged"],
+        false
+    );
+
+    // 3. ui/request-display-mode
+    let display = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "ui/request-display-mode",
+            "params": { "mode": "floating" }
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(display.status().is_success());
+    let display_payload: Value = display.json().expect("display mode json");
+    assert_eq!(display_payload["result"]["mode"], "floating");
+
+    // 4. ui/update-model-context
+    let update_ctx = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "ui/update-model-context",
+            "params": { "context": { "tools": [] } }
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(update_ctx.status().is_success());
+    let update_ctx_payload: Value = update_ctx.json().expect("update context json");
+    assert_eq!(update_ctx_payload["result"], json!({ "accepted": true }));
+
+    // 5. ui/message
+    let message = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "ui/message",
+            "params": { "type": "info", "text": "hello from test" }
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(message.status().is_success());
+    let message_payload: Value = message.json().expect("ui/message json");
+    assert_eq!(message_payload["result"], json!({ "accepted": true }));
+
+    // 6. ui/open-link
+    let open_link = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "ui/open-link",
+            "params": { "url": "https://example.com" }
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(open_link.status().is_success());
+    let open_link_payload: Value = open_link.json().expect("ui/open-link json");
+    assert_eq!(open_link_payload["result"], json!({ "accepted": true }));
+
+    // 7. ui/resource-teardown
+    let teardown = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "ui/resource-teardown",
+            "params": { "uri": "ui://zocli/dashboard" }
+        }),
+        Some(&session_id),
+        None,
+    );
+    assert!(teardown.status().is_success());
+    let teardown_payload: Value = teardown.json().expect("ui/resource-teardown json");
+    assert_eq!(teardown_payload["result"], json!({ "accepted": true }));
+}
+
+#[test]
+fn mcp_http_ui_notifications_accepted_in_batch() {
+    let server = TestHttpServer::spawn();
+    let client = client();
+
+    // Initialize
+    let initialize = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {
+                    "extensions": {
+                        "io.modelcontextprotocol/ui": {
+                            "mimeTypes": [APP_RESOURCE_MIME_TYPE]
+                        }
+                    }
+                },
+                "clientInfo": { "name": "http-ui-test", "version": "0.1.0" }
+            }
+        }),
+        None,
+        None,
+    );
+    let session_id = initialize
+        .headers()
+        .get("Mcp-Session-Id")
+        .expect("session header")
+        .to_str()
+        .expect("header string")
+        .to_string();
+
+    // Send batch: ui notifications + a ping request
+    let batch = post_json(
+        &client,
+        &server.url(),
+        json!([
+            {
+                "jsonrpc": "2.0",
+                "method": "ui/notifications/initialized",
+                "params": {}
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "ui/notifications/tool-input",
+                "params": { "tool": "zocli.mail.list", "input": {} }
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "ui/notifications/size-changed",
+                "params": { "width": 800, "height": 600 }
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "ping",
+                "params": {}
+            }
+        ]),
+        Some(&session_id),
+        None,
+    );
+    assert!(batch.status().is_success());
+
+    let batch_payload: Value = batch.json().expect("batch response json");
+    // Server unwraps single-element response arrays, so this is a plain object
+    assert_eq!(batch_payload["id"], 2);
+    assert_eq!(batch_payload["result"], json!({}));
 }

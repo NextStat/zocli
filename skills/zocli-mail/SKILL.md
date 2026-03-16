@@ -55,12 +55,12 @@ You need both the folder ID and the message ID returned by `mail list` or `mail 
 ### Send a message
 
 ```
-zocli mail send TO SUBJECT [BODY] [--cc EMAIL]... [--bcc EMAIL]... [--html HTML] [--profile ALIAS]
+zocli mail send TO SUBJECT [BODY] [--cc EMAIL]... [--bcc EMAIL]... [--html HTML] [--attachment FILE]... [--profile ALIAS]
 ```
 
-Text and HTML bodies are supported. Attachments are not part of the stable public surface.
+Text and HTML bodies are supported. Attach local files by providing their paths in the `--attachment` flag (CLI) or `attachments` array (MCP).
 
-Поддерживаются text и HTML. Вложения не входят в текущую stable public surface.
+Поддерживаются text и HTML. Прикрепляйте локальные файлы через флаг `--attachment` (CLI) или массив `attachments` (MCP).
 
 ### Reply to a message
 
@@ -78,9 +78,9 @@ zocli mail reply --folder-id FOLDER_ID MESSAGE_ID [BODY] [--cc EMAIL]... [--html
 zocli mail forward --folder-id FOLDER_ID MESSAGE_ID TO [BODY] [--cc EMAIL]... [--bcc EMAIL]... [--html HTML] [--profile ALIAS]
 ```
 
-Forwarding is message-level only. Attachment export is not part of the current stable surface.
+Forwarding is message-level only. Use `zocli.mail.attachment_export` to export individual attachments as base64.
 
-Forward работает только на уровне сообщения. Экспорт вложений не входит в текущую stable surface.
+Forward работает только на уровне сообщения. Используйте `zocli.mail.attachment_export` для экспорта вложений в base64.
 
 ## Typical flow
 

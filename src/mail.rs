@@ -95,6 +95,7 @@ pub struct MailSendRequest {
     pub subject: String,
     pub content: String,
     pub mail_format: String,
+    pub attachments: Vec<UploadedAttachment>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +110,8 @@ pub struct MailReplyRequest {
 #[derive(Clone, Debug)]
 pub struct MailForwardRequest {
     pub message_id: String,
+    pub folder_id: String,
+    pub from_address: String,
     pub to_address: String,
     pub content: String,
     pub cc_address: String,
@@ -377,6 +380,124 @@ pub fn search_mail_messages(
     Ok(parsed.data.unwrap_or_default())
 }
 
+/// Attachment metadata returned by Zoho's attachmentinfo endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    #[serde(alias = "attachmentId")]
+    pub attachment_id: String,
+    #[serde(alias = "attachmentName")]
+    pub attachment_name: String,
+    #[serde(alias = "attachmentSize", default)]
+    pub attachment_size: u64,
+}
+
+/// An uploaded attachment ready to be referenced in a send/forward payload.
+#[derive(Clone, Debug, Serialize)]
+pub struct UploadedAttachment {
+    #[serde(rename = "storeName")]
+    pub store_name: String,
+    #[serde(rename = "attachmentPath")]
+    pub attachment_path: String,
+    #[serde(rename = "attachmentName")]
+    pub attachment_name: String,
+}
+
+/// List attachments for a message.
+pub fn get_attachment_info(
+    base_url: &str,
+    account_id: &str,
+    access_token: &str,
+    folder_id: &str,
+    message_id: &str,
+) -> Result<Vec<AttachmentInfo>> {
+    let client = build_client()?;
+    let url = format!(
+        "{base_url}/api/accounts/{account_id}/folders/{folder_id}/messages/{message_id}/attachmentinfo"
+    );
+    let resp = client
+        .get(&url)
+        .header("Authorization", auth_header(access_token))
+        .send()?;
+    let body = checked_response_text(resp, "get_attachment_info")?;
+    let parsed: ZohoDataResponse<ZohoAttachmentInfoData> = serde_json::from_str(&body)
+        .map_err(|e| ZocliError::Api(format!("get_attachment_info: bad JSON: {e}")))?;
+    check_zoho_error(&parsed.status, "get_attachment_info")?;
+    Ok(parsed
+        .data
+        .map(|d| d.attachments)
+        .unwrap_or_default())
+}
+
+/// Download an attachment's raw bytes.
+pub fn download_attachment(
+    base_url: &str,
+    account_id: &str,
+    access_token: &str,
+    folder_id: &str,
+    message_id: &str,
+    attachment_id: &str,
+) -> Result<Vec<u8>> {
+    let client = build_client()?;
+    let url = format!(
+        "{base_url}/api/accounts/{account_id}/folders/{folder_id}/messages/{message_id}/attachments/{attachment_id}"
+    );
+    let resp = client
+        .get(&url)
+        .header("Authorization", auth_header(access_token))
+        .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(ZocliError::Api(format!(
+            "download_attachment: HTTP {status} — {text}"
+        )));
+    }
+    resp.bytes()
+        .map(|b| b.to_vec())
+        .map_err(|e| ZocliError::Network(format!("download_attachment: {e}")))
+}
+
+/// Upload a file as an attachment and return the metadata needed for send.
+pub fn upload_attachment(
+    base_url: &str,
+    account_id: &str,
+    access_token: &str,
+    file_name: &str,
+    file_bytes: Vec<u8>,
+) -> Result<UploadedAttachment> {
+    let client = build_client()?;
+    let url = format!(
+        "{base_url}/api/accounts/{account_id}/messages/attachments?uploadType=multipart"
+    );
+    let mime = mime_from_filename(file_name);
+    let part = reqwest::blocking::multipart::Part::bytes(file_bytes)
+        .file_name(file_name.to_string())
+        .mime_str(&mime)
+        .map_err(|e| ZocliError::Network(format!("upload_attachment: MIME error: {e}")))?;
+    let form = reqwest::blocking::multipart::Form::new().part("attach", part);
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", auth_header(access_token))
+        .multipart(form)
+        .send()?;
+    let body = checked_response_text(resp, "upload_attachment")?;
+    let parsed: ZohoDataResponse<Vec<ZohoUploadData>> = serde_json::from_str(&body)
+        .map_err(|e| ZocliError::Api(format!("upload_attachment: bad JSON: {e}")))?;
+    check_zoho_error(&parsed.status, "upload_attachment")?;
+    let items = parsed.data.ok_or_else(|| {
+        ZocliError::Api("upload_attachment: response contained no data".to_string())
+    })?;
+    let data = items.into_iter().next().ok_or_else(|| {
+        ZocliError::Api("upload_attachment: response contained empty array".to_string())
+    })?;
+    Ok(UploadedAttachment {
+        store_name: data.store_name,
+        attachment_path: data.attachment_path,
+        attachment_name: data.attachment_name,
+    })
+}
+
 /// Send a new mail message.
 pub fn send_mail_message(
     base_url: &str,
@@ -387,7 +508,7 @@ pub fn send_mail_message(
     let client = build_client()?;
     let url = format!("{base_url}/api/accounts/{account_id}/messages");
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "fromAddress": req.from_address,
         "toAddress": req.to_address,
         "ccAddress": req.cc_address,
@@ -396,6 +517,10 @@ pub fn send_mail_message(
         "content": req.content,
         "mailFormat": req.mail_format,
     });
+    if !req.attachments.is_empty() {
+        payload["attachments"] = serde_json::to_value(&req.attachments)
+            .map_err(|e| ZocliError::Api(format!("send_mail_message: attachment serialize: {e}")))?;
+    }
 
     let resp = client
         .post(&url)
@@ -465,54 +590,147 @@ pub fn reply_to_mail_message(
 }
 
 /// Forward a message to another recipient.
+///
+/// Zoho Mail API has no native "forward" action, so this:
+/// 1. Reads the original message content
+/// 2. Downloads and re-uploads any attachments
+/// 3. Sends a new message with forwarded content + attachments
 pub fn forward_mail_message(
     base_url: &str,
     account_id: &str,
     access_token: &str,
     req: MailForwardRequest,
 ) -> Result<ForwardedMail> {
-    let client = build_client()?;
-    let url = format!(
-        "{base_url}/api/accounts/{account_id}/messages/{}",
-        req.message_id
+    // 1. Read original message
+    let original = read_mail_message(
+        base_url,
+        account_id,
+        access_token,
+        &req.folder_id,
+        &req.message_id,
+    )?;
+
+    // 2. Re-upload attachments from the original message
+    let attachment_infos = get_attachment_info(
+        base_url,
+        account_id,
+        access_token,
+        &req.folder_id,
+        &req.message_id,
+    )?;
+    let mut uploaded: Vec<UploadedAttachment> = Vec::new();
+    for info in &attachment_infos {
+        let bytes = download_attachment(
+            base_url,
+            account_id,
+            access_token,
+            &req.folder_id,
+            &req.message_id,
+            &info.attachment_id,
+        )?;
+        let att = upload_attachment(
+            base_url,
+            account_id,
+            access_token,
+            &info.attachment_name,
+            bytes,
+        )?;
+        uploaded.push(att);
+    }
+
+    // 3. Format forwarded content
+    let user_note = if req.content.is_empty() {
+        String::new()
+    } else {
+        format!("<p>{}</p><br/>", req.content)
+    };
+    let forward_content = format!(
+        "{user_note}\
+         <p>---------- Forwarded message ----------</p>\
+         <p><b>From:</b> {from}</p>\
+         <p><b>Date:</b> {date}</p>\
+         <p><b>Subject:</b> {subject}</p>\
+         <p><b>To:</b> {to}</p>\
+         <br/>{body}",
+        from = original.sender,
+        date = original.received_time,
+        subject = original.subject,
+        to = original.to_address,
+        body = original.content,
     );
 
-    let mut payload = serde_json::json!({
-        "action": "forward",
-        "toAddress": req.to_address,
-        "content": req.content,
-    });
-    if !req.cc_address.is_empty() {
-        payload["ccAddress"] = serde_json::Value::String(req.cc_address.clone());
-    }
-    if !req.bcc_address.is_empty() {
-        payload["bccAddress"] = serde_json::Value::String(req.bcc_address.clone());
-    }
+    // 4. Send as new message
+    let fwd_subject = if original
+        .subject
+        .to_lowercase()
+        .starts_with("fwd:")
+    {
+        original.subject.clone()
+    } else {
+        format!("Fwd: {}", original.subject)
+    };
 
-    let resp = client
-        .post(&url)
-        .header("Authorization", auth_header(access_token))
-        .json(&payload)
-        .send()?;
-
-    let body = checked_response_text(resp, "forward_mail_message")?;
-    let parsed: ZohoDataResponse<ZohoSentData> = serde_json::from_str(&body)
-        .map_err(|e| ZocliError::Api(format!("forward_mail_message: bad JSON: {e}")))?;
-
-    check_zoho_error(&parsed.status, "forward_mail_message")?;
-
-    let data = parsed.data.ok_or_else(|| {
-        ZocliError::Api("forward_mail_message: response contained no data".to_string())
-    })?;
+    let sent = send_mail_message(
+        base_url,
+        account_id,
+        access_token,
+        MailSendRequest {
+            from_address: req.from_address,
+            to_address: req.to_address,
+            cc_address: req.cc_address,
+            bcc_address: req.bcc_address,
+            subject: fwd_subject,
+            content: forward_content,
+            mail_format: "html".to_string(),
+            attachments: uploaded,
+        },
+    )?;
 
     Ok(ForwardedMail {
-        message_id: data.message_id.unwrap_or_default(),
+        message_id: sent.message_id,
     })
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ZohoAttachmentInfoData {
+    #[serde(default)]
+    attachments: Vec<AttachmentInfo>,
+}
+
+#[derive(Deserialize)]
+struct ZohoUploadData {
+    #[serde(alias = "storeName")]
+    store_name: String,
+    #[serde(alias = "attachmentPath")]
+    attachment_path: String,
+    #[serde(alias = "attachmentName")]
+    attachment_name: String,
+}
+
+fn mime_from_filename(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv" => "text/csv",
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "zip" => "application/zip",
+        "gz" | "gzip" => "application/gzip",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
 
 /// Fetch a single message's metadata using the direct details endpoint.
 fn fetch_message_summary(

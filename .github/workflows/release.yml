@@ -11,6 +11,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ZOCLI_DEFAULT_CLIENT_ID: ${{ vars.ZOCLI_DEFAULT_CLIENT_ID || secrets.ZOCLI_DEFAULT_CLIENT_ID || '' }}
+  ZOCLI_DEFAULT_CLIENT_SECRET: ${{ secrets.ZOCLI_DEFAULT_CLIENT_SECRET || '' }}
 
 jobs:
   build-assets:
@@ -41,6 +43,13 @@ jobs:
             package_kind: windows
     steps:
       - uses: actions/checkout@v6
+      - name: Verify shared OAuth app is configured for release builds
+        shell: bash
+        run: |
+          test -n "$ZOCLI_DEFAULT_CLIENT_ID" || {
+            echo "::error::ZOCLI_DEFAULT_CLIENT_ID is required for official zocli release builds."
+            exit 1
+          }
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |

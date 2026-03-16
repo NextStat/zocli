@@ -193,6 +193,55 @@ fn simple_add_respects_manual_account_name() {
     assert_eq!(value["email"], "me@zoho.com");
 }
 
+#[test]
+fn simple_add_uses_shared_default_oauth_client_when_client_id_is_omitted() {
+    let temp = tempdir().expect("tempdir");
+
+    zocli()
+        .env("ZOCLI_CONFIG_DIR", temp.path())
+        .env("ZOCLI_DEFAULT_CLIENT_ID", "1000.SHAREDCLIENT")
+        .args(["add", "me@zoho.com"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"operation\":\"account.add\""));
+
+    let whoami = zocli()
+        .env("ZOCLI_CONFIG_DIR", temp.path())
+        .args(["whoami"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&whoami).expect("valid json");
+    assert_eq!(value["account"], "me");
+
+    let accounts = fs::read_to_string(temp.path().join("accounts.toml")).expect("accounts file");
+    assert!(accounts.contains("email = \"me@zoho.com\""));
+    assert!(
+        !accounts.contains("client_id ="),
+        "shared client flow must not persist client_id into accounts.toml"
+    );
+    assert!(
+        !accounts.contains("account_id ="),
+        "account_id must be omitted until login auto-discovers it"
+    );
+}
+
+#[test]
+fn simple_add_without_client_id_or_shared_default_fails_cleanly() {
+    let temp = tempdir().expect("tempdir");
+
+    zocli()
+        .env("ZOCLI_CONFIG_DIR", temp.path())
+        .args(["add", "me@zoho.com"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("shared default OAuth client").or(
+            predicate::str::contains("client_id must not be empty"),
+        ));
+}
+
 // ============================================================================
 // Help output tests
 // ============================================================================

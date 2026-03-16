@@ -40,7 +40,6 @@ const SKILLS: &[Skill] = &[
 ];
 
 pub const SKILL_COUNT: usize = 7;
-const LEGACY_SKILL_PREFIXES: &[&str] = &["yacli-"];
 
 pub fn skill_names() -> Vec<&'static str> {
     SKILLS.iter().map(|s| s.name).collect()
@@ -80,7 +79,6 @@ pub fn prompt_skill_name(prompt_name: &str) -> Option<&'static str> {
 /// Write all embedded skills to `target_dir/<skill-name>/SKILL.md`.
 /// Returns the number of skills written.
 pub fn install_skills(target_dir: &Path) -> Result<usize> {
-    remove_legacy_skills(target_dir)?;
     for skill in SKILLS {
         let skill_dir = target_dir.join(skill.name);
         fs::create_dir_all(&skill_dir).map_err(|err| {
@@ -100,52 +98,6 @@ pub fn install_skills(target_dir: &Path) -> Result<usize> {
     Ok(SKILLS.len())
 }
 
-fn remove_legacy_skills(target_dir: &Path) -> Result<()> {
-    if !target_dir.exists() {
-        return Ok(());
-    }
-
-    let entries = fs::read_dir(target_dir).map_err(|err| {
-        ZocliError::Io(format!(
-            "failed to read skills directory {}: {err}",
-            target_dir.display()
-        ))
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|err| {
-            ZocliError::Io(format!(
-                "failed to inspect skills directory {}: {err}",
-                target_dir.display()
-            ))
-        })?;
-        let file_type = entry.file_type().map_err(|err| {
-            ZocliError::Io(format!(
-                "failed to inspect skill entry {}: {err}",
-                entry.path().display()
-            ))
-        })?;
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if LEGACY_SKILL_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        {
-            fs::remove_dir_all(entry.path()).map_err(|err| {
-                ZocliError::Io(format!(
-                    "failed to remove legacy skill directory {}: {err}",
-                    entry.path().display()
-                ))
-            })?;
-        }
-    }
-
-    Ok(())
-}
 
 fn parse_frontmatter_description(content: &str) -> Option<String> {
     let frontmatter = content
@@ -302,11 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn install_skills_removes_legacy_yacli_directories() {
+    fn install_skills_preserves_yacli_coexistence() {
         let temp = tempdir().expect("tempdir");
-        let legacy_dir = temp.path().join("yacli-mail");
-        fs::create_dir_all(&legacy_dir).expect("legacy dir");
-        fs::write(legacy_dir.join("SKILL.md"), "legacy").expect("legacy skill");
+        let yacli_dir = temp.path().join("yacli-mail");
+        fs::create_dir_all(&yacli_dir).expect("yacli dir");
+        fs::write(yacli_dir.join("SKILL.md"), "yacli mail skill").expect("yacli skill");
 
         let other_dir = temp.path().join("custom-skill");
         fs::create_dir_all(&other_dir).expect("other dir");
@@ -314,8 +266,16 @@ mod tests {
 
         install_skills(temp.path()).expect("install");
 
-        assert!(!legacy_dir.exists(), "legacy yacli skill should be removed");
-        assert!(other_dir.exists(), "unrelated skills should be preserved");
+        assert!(
+            yacli_dir.exists(),
+            "yacli-mail skill must survive zocli install"
+        );
+        assert_eq!(
+            fs::read_to_string(yacli_dir.join("SKILL.md")).unwrap(),
+            "yacli mail skill",
+            "yacli skill content must be untouched"
+        );
+        assert!(other_dir.exists(), "unrelated skills must be preserved");
         assert!(temp.path().join("zocli-mail/SKILL.md").exists());
     }
 

@@ -95,16 +95,16 @@ pub enum Command {
         /// Zoho datacenter (com, eu, in, com.au, jp, zohocloud.ca, sa, uk)
         #[arg(long, default_value = "com", value_name = "DC")]
         datacenter: String,
-        /// Zoho account ID (numeric, from Zoho admin panel)
+        /// Advanced override: Zoho account ID. When omitted, zocli auto-discovers it after login.
         #[arg(long, value_name = "ID")]
-        account_id: String,
+        account_id: Option<String>,
         /// Zoho organization ID (for WorkDrive team operations)
         #[arg(long, value_name = "ORG_ID")]
         org_id: Option<String>,
-        /// OAuth2 client ID from Zoho API Console
+        /// Advanced override: OAuth2 client ID. When omitted, zocli uses the shared/default OAuth app.
         #[arg(long, value_name = "CLIENT_ID")]
-        client_id: String,
-        /// OAuth2 client secret
+        client_id: Option<String>,
+        /// Advanced override: OAuth2 client secret.
         #[arg(long, value_name = "SECRET")]
         client_secret: Option<String>,
     },
@@ -244,11 +244,11 @@ pub enum AccountCommand {
         #[arg(long, default_value = "com", value_name = "DC")]
         datacenter: String,
         #[arg(long, value_name = "ID")]
-        account_id: String,
+        account_id: Option<String>,
         #[arg(long, value_name = "ORG_ID")]
         org_id: Option<String>,
         #[arg(long, value_name = "CLIENT_ID")]
-        client_id: String,
+        client_id: Option<String>,
         #[arg(long, value_name = "SECRET")]
         client_secret: Option<String>,
     },
@@ -388,6 +388,8 @@ pub enum MailCommand {
         bcc: Vec<String>,
         #[arg(long, value_name = "HTML")]
         html: Option<String>,
+        #[arg(long = "attachment", value_name = "FILE")]
+        attachments: Vec<String>,
     },
     /// Reply to a message.
     Reply {

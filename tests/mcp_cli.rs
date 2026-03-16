@@ -740,7 +740,7 @@ fn mcp_install_writes_skills_to_claude_directory() {
 }
 
 #[test]
-fn mcp_install_claude_migrates_legacy_yacli_config_and_skills() {
+fn mcp_install_claude_preserves_yacli_coexistence() {
     let temp = tempdir().expect("tempdir");
     let home = temp.path();
     let bin_dir = home.join("bin");
@@ -804,24 +804,42 @@ fn mcp_install_claude_migrates_legacy_yacli_config_and_skills() {
     let installed: Value =
         serde_json::from_slice(&fs::read(home.join(".claude.json")).expect("claude config"))
             .expect("json");
-    assert!(installed["mcpServers"].get("yacli").is_none());
+
+    // yacli entries MUST survive — coexistence is required
+    assert!(
+        installed["mcpServers"].get("yacli").is_some(),
+        "yacli top-level entry must survive zocli install"
+    );
+    assert_eq!(installed["mcpServers"]["yacli"]["command"], "/tmp/yacli");
     assert!(
         installed["projects"]["/tmp/project"]["mcpServers"]
             .get("yacli")
-            .is_none()
+            .is_some(),
+        "yacli nested project entry must survive zocli install"
     );
+
+    // zocli must also be present
     assert_eq!(installed["mcpServers"]["zocli"]["type"], "stdio");
     assert_eq!(installed["mcpServers"]["zocli"]["args"][0], "mcp");
 
+    // yacli skills must survive
     let skills_dir = home.join(".claude/skills");
-    assert!(!skills_dir.join("yacli-mail").exists());
-    assert!(!skills_dir.join("yacli-shared").exists());
+    assert!(
+        skills_dir.join("yacli-mail").exists(),
+        "yacli-mail skill must survive zocli install"
+    );
+    assert!(
+        skills_dir.join("yacli-shared").exists(),
+        "yacli-shared skill must survive zocli install"
+    );
+
+    // zocli skills must also be present
     assert!(skills_dir.join("zocli-mail/SKILL.md").exists());
     assert!(skills_dir.join("zocli-shared/SKILL.md").exists());
 }
 
 #[test]
-fn mcp_install_claude_desktop_removes_legacy_yacli_server() {
+fn mcp_install_claude_desktop_preserves_yacli_coexistence() {
     let temp = tempdir().expect("tempdir");
     let home = temp.path();
     let desktop_path = claude_desktop_config_path(home);
@@ -855,8 +873,18 @@ fn mcp_install_claude_desktop_removes_legacy_yacli_server() {
 
     let installed: Value =
         serde_json::from_slice(&fs::read(&desktop_path).expect("desktop config")).expect("json");
-    assert!(installed["mcpServers"].get("yacli").is_none());
+
+    // yacli must survive — coexistence is required
+    assert!(
+        installed["mcpServers"].get("yacli").is_some(),
+        "yacli entry must survive zocli install in Claude Desktop"
+    );
+    assert_eq!(installed["mcpServers"]["yacli"]["command"], "/tmp/yacli");
+
+    // other existing servers must survive
     assert_eq!(installed["mcpServers"]["existing"]["command"], "node");
+
+    // zocli must also be present
     assert_eq!(installed["mcpServers"]["zocli"]["args"][0], "mcp");
 }
 

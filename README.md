@@ -72,7 +72,7 @@ zocli update --check
 For a private release mirror:
 
 ```bash
-export ZOCLI_UPDATE_BASE_URL='https://mirror.example.test/releases/download/v0.1.33'
+export ZOCLI_UPDATE_BASE_URL='https://mirror.example.test/releases/download/v0.2.0'
 zocli update --check
 ```
 
@@ -84,9 +84,15 @@ Install `zocli`, register one Zoho account, authenticate once, and verify the co
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NextStat/zocli/main/scripts/install.sh | sh
-zocli add me@zoho.com --account-id 12345 --client-id 1000.XXXX
+zocli add me@zoho.com
 zocli login
 zocli mcp install --client claude
+```
+
+If your Zoho account lives outside the default `com` datacenter, pass it explicitly during account setup, for example:
+
+```bash
+zocli add me@company.com --datacenter eu
 ```
 
 Then verify the runtime:
@@ -121,7 +127,7 @@ zocli guide --topic drive
 ### Accounts and Auth
 
 ```bash
-zocli add me@zoho.com --account-id 12345 --client-id 1000.XXXX
+zocli add me@zoho.com
 zocli accounts
 zocli use work
 zocli whoami
@@ -131,6 +137,9 @@ zocli logout mail
 ```
 
 - `add` derives the account alias from the email unless you pass one explicitly.
+- `add` no longer requires `account_id`; `zocli login` auto-discovers it after the first successful OAuth flow.
+- `add` can use the shared/default zocli OAuth app automatically. Use `--client-id` and `--client-secret` only as advanced overrides.
+- `--datacenter` matters for non-`com` Zoho accounts. Valid values are `com`, `eu`, `in`, `com.au`, `jp`, `zohocloud.ca`, `sa`, and `uk`.
 - `login` authenticates Zoho OAuth2 for `mail`, `calendar`, and `drive` unless you scope it to one service.
 - `--profile <alias>` can override the current account on any service command.
 
@@ -142,13 +151,14 @@ zocli mail list --limit 10
 zocli mail search "invoice"
 zocli mail read --folder-id 1111111111111111111 2222222222222222222
 zocli mail send person@example.com "Meeting" "See you at 3pm"
+zocli mail send person@example.com "Report" "Attached." --attachment ./report.pdf
 zocli mail reply --folder-id 1111111111111111111 2222222222222222222 "Got it, thanks"
 zocli mail forward --folder-id 1111111111111111111 2222222222222222222 person@example.com "FYI"
 ```
 
 - `mail read`, `mail reply`, and `mail forward` require both the folder ID and the message ID.
 - `mail search` is the fastest way to discover the message ID before a read or reply.
-- `mail send` supports text, HTML, `cc`, and `bcc`.
+- `mail send` supports text, HTML, `cc`, `bcc`, and repeated `--attachment` flags.
 
 ### Calendar
 
@@ -201,7 +211,7 @@ The installer registers the MCP server and writes embedded skills where the targ
 ### What an MCP client gets
 
 - account and auth tools;
-- mail, calendar, and WorkDrive tools;
+- mail, calendar, and WorkDrive tools, including `zocli.mail.attachment_export`;
 - hosted dashboard at `ui://zocli/dashboard`;
 - embedded prompts and skill resources;
 - completion hints for accounts, calendars, and dashboard views.
@@ -211,8 +221,8 @@ The installer registers the MCP server and writes embedded skills where the targ
 `zocli` is account-first. One current account stays active until you switch it.
 
 ```bash
-zocli add personal@zoho.com --account-id 11111 --client-id 1000.AAA
-zocli add work@zoho.com --account-id 22222 --client-id 1000.BBB
+zocli add personal@zoho.com
+zocli add work@zoho.com
 zocli use work
 zocli login
 zocli use personal
@@ -234,7 +244,8 @@ Each account keeps its own credentials and service status. Use `--profile <alias
 
 ## Limitations
 
-- Mail attachment export and calendar-invite import are not part of the current stable public surface.
+- Calendar-invite import from mail is not part of the current stable public surface.
+- Mail attachment export is available through the MCP tool `zocli.mail.attachment_export`; there is no separate CLI command for it.
 - WorkDrive uses real folder IDs and file IDs, not a virtual `disk:/...` path layer.
 - MCP prompts and embedded skills only document workflows that are backed by live tools in this repository.
 

@@ -167,10 +167,16 @@ fn resolve_store_oauth_token(
     })?;
 
     let auth_base_url = datacenter_auth_url(&account.datacenter);
+    let client_id = account.oauth_client_id().ok_or_else(|| {
+        ZocliError::Config(format!(
+            "no OAuth client is configured for account {account_name}; configure the shared/default zocli OAuth app or re-run `zocli add --client-id ...`"
+        ))
+    })?;
+    let client_secret = account.oauth_client_secret();
     let new_credential = refresh_access_token(
         &auth_base_url,
-        &account.client_id,
-        account.client_secret.as_deref(),
+        &client_id,
+        client_secret.as_deref(),
         refresh_token,
     )?;
 

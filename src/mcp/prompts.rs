@@ -540,7 +540,7 @@ Use this workflow:\n\
 5. For write actions, use `zocli.mail.send`, `zocli.mail.reply`, or `zocli.mail.forward` with the smallest sufficient payload.\n\
 6. In the final answer, record the sender, subject, relevant dates, and the exact result of any write action.\n\
 \n\
-Do not imply attachment export or invite import support because those tools are not part of the current stable MCP surface."
+Attachment export is available via `zocli.mail.attachment_export` (requires folder_id, message_id, and attachment_id from `zocli.mail.read`). Do not imply invite import support because that tool is not part of the current stable MCP surface."
     ))
 }
 

@@ -33,8 +33,9 @@ use crate::{
     },
     disk::{download_file, list_files, list_teams, upload_file},
     mail::{
-        forward_mail_message, list_mail_folders, list_mail_messages, read_mail_message,
-        reply_to_mail_message, search_mail_messages, send_mail_message,
+        download_attachment, forward_mail_message, get_attachment_info, list_mail_folders,
+        list_mail_messages, read_mail_message, reply_to_mail_message, search_mail_messages,
+        send_mail_message, upload_attachment,
     },
 };
 use chrono::{DateTime, Utc};
@@ -45,8 +46,14 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const APP_RESOURCE_URI: &str = "ui://zocli/dashboard";
 const APP_RESOURCE_URI_TEMPLATE: &str =
     "ui://zocli/dashboard{?account,section,resource,tool,skill,prompt}";
+const APP_MAIL_RESOURCE_URI: &str = "ui://zocli/mail";
+const APP_CALENDAR_RESOURCE_URI: &str = "ui://zocli/calendar";
+const APP_DRIVE_RESOURCE_URI: &str = "ui://zocli/drive";
+const APP_AUTH_RESOURCE_URI: &str = "ui://zocli/auth";
+const APP_ACCOUNT_RESOURCE_URI: &str = "ui://zocli/account";
 const APP_RESOURCE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 const APP_EXTENSION_ID: &str = "io.modelcontextprotocol/ui";
+const APP_SURFACES: &[&str] = &["dashboard", "mail", "calendar", "drive", "auth", "account"];
 const APP_ACCOUNT_QUERY_PARAM: &str = "account";
 const APP_SECTION_QUERY_PARAM: &str = "section";
 const APP_RESOURCE_QUERY_PARAM: &str = "resource";
@@ -103,6 +110,7 @@ struct MailSendToolRequest {
     subject: String,
     text: Option<String>,
     html: Option<String>,
+    attachments: Vec<String>,
 }
 
 struct MailReplyToolRequest {
@@ -115,6 +123,8 @@ struct MailReplyToolRequest {
 struct SessionState {
     initialized: bool,
     ui_enabled: bool,
+    ui_initialized: bool,
+    ui_active_resource: Option<String>,
     supports_resource_subscriptions: bool,
     supports_roots_requests: bool,
     roots_list_changed_supported: bool,
@@ -130,6 +140,8 @@ impl SessionState {
         Self {
             initialized: false,
             ui_enabled: false,
+            ui_initialized: false,
+            ui_active_resource: None,
             supports_resource_subscriptions: true,
             supports_roots_requests: false,
             roots_list_changed_supported: false,
@@ -145,6 +157,8 @@ impl SessionState {
         Self {
             initialized: false,
             ui_enabled: false,
+            ui_initialized: false,
+            ui_active_resource: None,
             supports_resource_subscriptions: true,
             supports_roots_requests: false,
             roots_list_changed_supported: false,
@@ -331,7 +345,7 @@ pub fn serve_stdio() -> Result<()> {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
 
                 if message.get("id").is_none() {
-                    handle_notification(method, &mut session);
+                    handle_notification(method, &params, &mut session);
                     continue;
                 }
 
@@ -840,7 +854,7 @@ fn execute_message(
     let params = message.get("params").cloned().unwrap_or(Value::Null);
 
     if message.get("id").is_none() {
-        handle_notification(method, session);
+        handle_notification(method, &params, session);
         return Ok(None);
     }
 
@@ -869,7 +883,7 @@ fn execute_message(
     Ok(Some(response))
 }
 
-fn handle_notification(method: &str, session: &mut SessionState) {
+fn handle_notification(method: &str, params: &Value, session: &mut SessionState) {
     match method {
         "notifications/initialized" => {
             session.initialized = true;
@@ -877,6 +891,22 @@ fn handle_notification(method: &str, session: &mut SessionState) {
         "notifications/roots/list_changed" => {
             session.roots_dirty = true;
             session.cached_roots = None;
+        }
+        // MCP Apps lifecycle notifications (View → Host, host may proxy).
+        // Track state transitions — these are fire-and-forget but observable.
+        "ui/notifications/initialized" => {
+            session.ui_initialized = true;
+            if let Some(uri) = params.get("resourceUri").and_then(Value::as_str) {
+                session.ui_active_resource = Some(uri.to_string());
+            }
+        }
+        "ui/notifications/tool-input"
+        | "ui/notifications/tool-input-partial"
+        | "ui/notifications/tool-result"
+        | "ui/notifications/host-context-changed"
+        | "ui/notifications/size-changed"
+        | "ui/notifications/tool-cancelled" => {
+            // Valid lifecycle notifications — accepted silently per MCP Apps spec.
         }
         _ => {}
     }
@@ -949,6 +979,60 @@ fn handle_request(
         "resources/subscribe" => subscribe_resource(params, session, poller),
         "resources/unsubscribe" => unsubscribe_resource(params, session, poller),
         "resources/read" => read_resource(params),
+
+        // ── MCP Apps lifecycle (View ↔ Host, host may proxy to server) ──
+        "ui/initialize" => {
+            session.ui_initialized = true;
+            Ok(json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": {
+                    "name": "zocli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "resources": { "listChanged": false },
+                }
+            }))
+        }
+        // All remaining ui/* methods require a prior ui/initialize call.
+        "ui/update-model-context"
+        | "ui/message"
+        | "ui/request-display-mode"
+        | "ui/open-link"
+        | "ui/resource-teardown"
+            if !session.ui_initialized =>
+        {
+            Err(ZocliError::UnsupportedOperation(
+                "ui/initialize must be called before other ui/* methods".to_string(),
+            ))
+        }
+        "ui/update-model-context" => {
+            Ok(json!({ "accepted": true }))
+        }
+        "ui/message" => {
+            Ok(json!({ "accepted": true }))
+        }
+        "ui/request-display-mode" => {
+            let mode = params
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("inline");
+            let validated = match mode {
+                "inline" | "floating" | "full-window" => mode,
+                _ => "inline",
+            };
+            Ok(json!({ "mode": validated }))
+        }
+        "ui/open-link" => {
+            Ok(json!({ "accepted": true }))
+        }
+        "ui/resource-teardown" => {
+            session.ui_active_resource = None;
+            session.ui_initialized = false;
+            Ok(json!({ "accepted": true }))
+        }
+
         _ => Err(ZocliError::UnsupportedOperation(format!(
             "unsupported MCP method: {method}"
         ))),
@@ -966,7 +1050,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "properties": {},
                 "additionalProperties": false
             }),
-            Some(APP_ONLY_VISIBILITY),
             ui_enabled,
         ));
     }
@@ -980,7 +1063,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "properties": {},
                 "additionalProperties": false
             }),
-            Some(MODEL_AND_APP_VISIBILITY),
             ui_enabled,
         ));
     }
@@ -994,7 +1076,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "properties": {},
                 "additionalProperties": false
             }),
-            Some(MODEL_AND_APP_VISIBILITY),
             ui_enabled,
         ),
         tool(
@@ -1005,7 +1086,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "properties": {},
                 "additionalProperties": false
             }),
-            Some(MODEL_AND_APP_VISIBILITY),
             ui_enabled,
         ),
         tool(
@@ -1018,7 +1098,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            Some(MODEL_AND_APP_VISIBILITY),
             ui_enabled,
         ),
         tool(
@@ -1031,7 +1110,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            Some(MODEL_AND_APP_VISIBILITY),
             ui_enabled,
         ),
         tool(
@@ -1044,7 +1122,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1060,7 +1137,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1076,7 +1152,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["query"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1092,12 +1167,11 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["folder_id", "message_id"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
             "zocli.mail.send",
-            "Send one mail message.",
+            "Send one mail message. Optionally attach files by providing local file paths in the attachments array.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1114,12 +1188,16 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                     },
                     "subject": { "type": "string" },
                     "text": { "type": "string" },
-                    "html": { "type": "string" }
+                    "html": { "type": "string" },
+                    "attachments": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Local file paths to attach"
+                    }
                 },
                 "required": ["to", "subject"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1141,7 +1219,22 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["folder_id", "message_id"],
                 "additionalProperties": false
             }),
-            None,
+            ui_enabled,
+        ),
+        tool(
+            "zocli.mail.attachment_export",
+            "Export one attachment from a message as base64. Use get_attachment_info from mail.read to find attachment IDs.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "folder_id": { "type": "string" },
+                    "message_id": { "type": "string" },
+                    "attachment_id": { "type": "string" }
+                },
+                "required": ["folder_id", "message_id", "attachment_id"],
+                "additionalProperties": false
+            }),
             ui_enabled,
         ),
         tool(
@@ -1168,7 +1261,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["folder_id", "message_id", "to"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1181,7 +1273,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1198,7 +1289,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1218,7 +1308,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["summary", "start", "end"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1234,7 +1323,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["uid"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1247,7 +1335,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 },
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1264,7 +1351,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["folder_id"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1281,7 +1367,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["folder_id", "source"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
         tool(
@@ -1298,7 +1383,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
                 "required": ["file_id", "output_path"],
                 "additionalProperties": false
             }),
-            None,
             ui_enabled,
         ),
     ]);
@@ -1306,13 +1390,7 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
     tools
 }
 
-fn tool(
-    name: &str,
-    description: &str,
-    input_schema: Value,
-    visibility: Option<&[&str]>,
-    ui_enabled: bool,
-) -> Value {
+fn tool(name: &str, description: &str, input_schema: Value, ui_enabled: bool) -> Value {
     let mut object = Map::new();
     object.insert("name".to_string(), Value::String(name.to_string()));
     object.insert(
@@ -1320,10 +1398,11 @@ fn tool(
         Value::String(description.to_string()),
     );
     object.insert("inputSchema".to_string(), input_schema);
-    if let Some(visibility) = visibility
-        && ui_enabled
-    {
-        object.insert("_meta".to_string(), app_meta(visibility));
+    if ui_enabled {
+        object.insert(
+            "_meta".to_string(),
+            app_meta(tool_surface(name), tool_visibility(name)),
+        );
     }
     Value::Object(object)
 }
@@ -1338,7 +1417,7 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
 
-    let structured = match name {
+    let mut structured = match name {
         "zocli.app.snapshot" => app_snapshot()?,
         "zocli.account.list" => account_list()?,
         "zocli.account.current" => account_current()?,
@@ -1363,6 +1442,12 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
             required_string(&arguments, "folder_id")?,
             required_string(&arguments, "message_id")?,
         )?,
+        "zocli.mail.attachment_export" => mail_attachment_export(
+            arguments.get("account").and_then(Value::as_str),
+            required_string(&arguments, "folder_id")?,
+            required_string(&arguments, "message_id")?,
+            required_string(&arguments, "attachment_id")?,
+        )?,
         "zocli.mail.send" => mail_send(
             arguments.get("account").and_then(Value::as_str),
             MailSendToolRequest {
@@ -1375,6 +1460,7 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
                 subject: required_string(&arguments, "subject")?.to_string(),
                 text: optional_string_owned(&arguments, "text"),
                 html: optional_string_owned(&arguments, "html"),
+                attachments: string_list(&arguments, "attachments")?,
             },
         )?,
         "zocli.mail.reply" => mail_reply(
@@ -1449,6 +1535,12 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
         }
     };
 
+    // Stamp every structuredContent payload with a schema version
+    // so hosts can detect breaking changes.
+    if let Value::Object(ref mut map) = structured {
+        map.insert("schemaVersion".to_string(), json!("1.0"));
+    }
+
     let text = serde_json::to_string_pretty(&structured)
         .map_err(|err| ZocliError::Serialization(err.to_string()))?;
 
@@ -1463,8 +1555,11 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
             }
         ]),
     );
-    if ui_enabled && let Some(visibility) = tool_visibility(name) {
-        response.insert("_meta".to_string(), app_meta(visibility));
+    if ui_enabled {
+        response.insert(
+            "_meta".to_string(),
+            app_meta(tool_surface(name), tool_visibility(name)),
+        );
     }
 
     Ok(Value::Object(response))
@@ -1490,6 +1585,41 @@ fn resource_definitions(ui_enabled: bool) -> Vec<Value> {
             "uri": APP_RESOURCE_URI,
             "name": "zocli MCP Dashboard",
             "description": "Minimal MCP Apps-compatible HTML surface for zocli",
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": app_resource_meta()
+        }));
+        resources.push(json!({
+            "uri": APP_MAIL_RESOURCE_URI,
+            "name": "zocli Mail",
+            "description": "Mail workflow surface for Zoho Mail",
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": app_resource_meta()
+        }));
+        resources.push(json!({
+            "uri": APP_CALENDAR_RESOURCE_URI,
+            "name": "zocli Calendar",
+            "description": "Calendar workflow surface for Zoho Calendar",
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": app_resource_meta()
+        }));
+        resources.push(json!({
+            "uri": APP_DRIVE_RESOURCE_URI,
+            "name": "zocli Drive",
+            "description": "Drive workflow surface for Zoho WorkDrive",
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": app_resource_meta()
+        }));
+        resources.push(json!({
+            "uri": APP_AUTH_RESOURCE_URI,
+            "name": "zocli Auth",
+            "description": "Auth status and remediation surface",
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": app_resource_meta()
+        }));
+        resources.push(json!({
+            "uri": APP_ACCOUNT_RESOURCE_URI,
+            "name": "zocli Account",
+            "description": "Account management surface",
             "mimeType": APP_RESOURCE_MIME_TYPE,
             "_meta": app_resource_meta()
         }));
@@ -1527,6 +1657,21 @@ fn resource_templates(_ui_enabled: bool) -> Vec<Value> {
             "mimeType": APP_RESOURCE_MIME_TYPE,
             "_meta": app_resource_meta()
         }));
+        for (uri, name, description) in [
+            ("ui://zocli/mail{?account}", "zocli Mail", "Load the mail workflow surface"),
+            ("ui://zocli/calendar{?account}", "zocli Calendar", "Load the calendar workflow surface"),
+            ("ui://zocli/drive{?account}", "zocli Drive", "Load the drive workflow surface"),
+            ("ui://zocli/auth{?account}", "zocli Auth", "Load the auth status surface"),
+            ("ui://zocli/account{?account}", "zocli Account", "Load the account management surface"),
+        ] {
+            templates.push(json!({
+                "uriTemplate": uri,
+                "name": name,
+                "description": description,
+                "mimeType": APP_RESOURCE_MIME_TYPE,
+                "_meta": app_resource_meta()
+            }));
+        }
     }
 
     templates
@@ -1616,12 +1761,36 @@ fn auth_status(account: Option<&str>) -> Result<Value> {
     let account = account_store.get_account(&name)?;
     let credential_store = CredentialStore::load()?;
 
+    let state = auth_state(
+        &credential_store,
+        &name,
+        account.credential_ref.as_deref(),
+        "oauth",
+    );
+    let guidance = auth_guidance(state.credential_state, &name);
+    let auth_discovery = app_auth_discovery();
+
     Ok(json!({
         "account": name,
         "email": account.email,
         "datacenter": account.datacenter,
-        "auth": auth_state(&credential_store, &name, account.credential_ref.as_deref(), "oauth"),
+        "auth": state,
+        "guidance": guidance,
+        "authDiscovery": auth_discovery,
     }))
+}
+
+fn auth_guidance(credential_state: &str, _account_name: &str) -> &'static str {
+    match credential_state {
+        "not_configured" => "No credential reference configured. Run `zocli add` to set up an account with OAuth.",
+        "store_missing" => "Account is configured but not logged in. Run `zocli login` to authenticate with Zoho.",
+        "store_expired" => "OAuth token has expired. Run `zocli login` to re-authenticate with Zoho.",
+        "store_present" => "Authenticated and ready. All Zoho API tools are available.",
+        "env_present" => "Using environment variable for authentication. Ready.",
+        "env_missing" => "Environment variable for authentication is not set. Set the required variable or switch to OAuth.",
+        "store_mismatch" => "Credential reference points to a different service. Check your account configuration.",
+        _ => "Unknown auth state. Run `zocli auth status` for details.",
+    }
 }
 
 fn update_check(version: Option<&str>) -> Result<Value> {
@@ -1787,6 +1956,55 @@ fn mail_read(account: Option<&str>, folder_id: &str, message_id: &str) -> Result
     }))
 }
 
+fn mail_attachment_export(
+    account: Option<&str>,
+    folder_id: &str,
+    message_id: &str,
+    attachment_id: &str,
+) -> Result<Value> {
+    use base64::Engine;
+    let (resolved_account, config, access_token) = resolve_zoho_context(account)?;
+    let base_url = config.mail_api_url();
+
+    let attachments = get_attachment_info(
+        &base_url,
+        &config.account_id,
+        &access_token,
+        folder_id,
+        message_id,
+    )?;
+
+    let info = attachments
+        .iter()
+        .find(|a| a.attachment_id == attachment_id)
+        .ok_or_else(|| {
+            ZocliError::Validation(format!(
+                "attachment {attachment_id} not found on message {message_id}"
+            ))
+        })?;
+
+    let bytes = download_attachment(
+        &base_url,
+        &config.account_id,
+        &access_token,
+        folder_id,
+        message_id,
+        attachment_id,
+    )?;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    Ok(json!({
+        "account": resolved_account,
+        "folder_id": folder_id,
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+        "attachment_name": info.attachment_name,
+        "attachment_size": info.attachment_size,
+        "content_base64": encoded,
+    }))
+}
+
 fn mail_send(account: Option<&str>, request: MailSendToolRequest) -> Result<Value> {
     let (resolved_account, config, access_token) = resolve_zoho_context(account)?;
     let base_url = config.mail_api_url();
@@ -1809,6 +2027,24 @@ fn mail_send(account: Option<&str>, request: MailSendToolRequest) -> Result<Valu
         "plaintext".to_string()
     };
 
+    // Upload attachments from local file paths
+    let uploaded_attachments = request
+        .attachments
+        .iter()
+        .map(|path| {
+            let file_path = std::path::Path::new(path);
+            let file_name = file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let file_bytes = std::fs::read(file_path).map_err(|e| {
+                ZocliError::Validation(format!("cannot read attachment {path}: {e}"))
+            })?;
+            upload_attachment(&base_url, &config.account_id, &access_token, &file_name, file_bytes)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let sent = send_mail_message(
         &base_url,
         &config.account_id,
@@ -1821,6 +2057,7 @@ fn mail_send(account: Option<&str>, request: MailSendToolRequest) -> Result<Valu
             subject: request.subject,
             content,
             mail_format,
+            attachments: uploaded_attachments,
         },
     )?;
     Ok(json!({
@@ -1860,6 +2097,8 @@ fn mail_forward(account: Option<&str>, request: MailForwardToolRequest) -> Resul
         &access_token,
         crate::mail::MailForwardRequest {
             message_id: request.message_id,
+            folder_id: request.folder_id.clone(),
+            from_address: config.email.clone(),
             to_address: request.to,
             content: request.content.unwrap_or_default(),
             cc_address: request.cc.join(","),
@@ -2076,7 +2315,7 @@ fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>> {
 }
 
 fn app_html(uri: &str) -> Result<String> {
-    let bootstrap_state = parse_dashboard_resource_state(uri)?;
+    let bootstrap_state = parse_app_resource_state(uri)?;
     let bootstrap = serde_json::to_string(&json!({
         "resourceUri": uri,
         "defaultAccount": bootstrap_state.default_account,
@@ -2119,10 +2358,10 @@ fn resource_contents(uri: &str) -> Result<Vec<Value>> {
             "text": "# zocli MCP\n\nStable read-only tools are available for accounts, auth status, mail, calendar, and drive.\n\nApps-ready clients can also load `ui://zocli/dashboard`."
         })]),
         "resource://zocli/skills" => json_resource_contents(uri, skills_catalog_resource()),
-        dashboard_uri if is_dashboard_resource_uri(dashboard_uri) => Ok(vec![json!({
-            "uri": dashboard_uri,
+        app_uri if is_app_resource_uri(app_uri) => Ok(vec![json!({
+            "uri": app_uri,
             "mimeType": APP_RESOURCE_MIME_TYPE,
-            "text": app_html(dashboard_uri)?,
+            "text": app_html(app_uri)?,
             "_meta": app_resource_meta()
         })]),
         account_uri if account_uri.starts_with("resource://zocli/account/") => {
@@ -2140,8 +2379,78 @@ fn resource_contents(uri: &str) -> Result<Vec<Value>> {
     }
 }
 
-fn is_dashboard_resource_uri(uri: &str) -> bool {
-    parse_dashboard_resource_state(uri).is_ok()
+fn is_app_resource_uri(uri: &str) -> bool {
+    parse_app_resource_state(uri).is_ok()
+}
+
+fn parse_app_resource_state(uri: &str) -> Result<DashboardResourceState> {
+    let parsed = Url::parse(uri)
+        .map_err(|err| ZocliError::Validation(format!("invalid resource URI `{uri}`: {err}")))?;
+
+    if parsed.scheme() != "ui" || parsed.host_str() != Some("zocli") {
+        return Err(ZocliError::UnsupportedOperation(format!(
+            "unknown MCP resource: {uri}"
+        )));
+    }
+
+    let surface = parsed
+        .path()
+        .strip_prefix('/')
+        .unwrap_or(parsed.path());
+
+    if !APP_SURFACES.contains(&surface) {
+        return Err(ZocliError::UnsupportedOperation(format!(
+            "unknown MCP resource: {uri}"
+        )));
+    }
+
+    if surface == "dashboard" {
+        return parse_dashboard_resource_state(uri);
+    }
+
+    // Non-dashboard surfaces only accept ?account
+    let mut account = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            APP_ACCOUNT_QUERY_PARAM => {
+                if value.trim().is_empty() {
+                    return Err(ZocliError::Validation(format!(
+                        "{surface} resource query `{APP_ACCOUNT_QUERY_PARAM}` cannot be empty"
+                    )));
+                }
+                if account.replace(value.into_owned()).is_some() {
+                    return Err(ZocliError::Validation(format!(
+                        "{surface} resource query `{APP_ACCOUNT_QUERY_PARAM}` cannot appear more than once"
+                    )));
+                }
+            }
+            _ => {
+                return Err(ZocliError::UnsupportedOperation(format!(
+                    "unknown MCP resource: {uri}"
+                )));
+            }
+        }
+    }
+
+    // Map each surface to a focused section+prompt so the app shell
+    // renders the relevant view, not a generic empty dashboard.
+    let (section, prompt) = match surface {
+        "mail" => (Some(DASHBOARD_SECTION_PROMPTS), Some("mail")),
+        "calendar" => (Some(DASHBOARD_SECTION_PROMPTS), Some("calendar")),
+        "drive" => (Some(DASHBOARD_SECTION_PROMPTS), Some("drive")),
+        "auth" => (Some(DASHBOARD_SECTION_AUTH), None),
+        "account" => (Some(DASHBOARD_SECTION_AUTH), None),
+        _ => (None, None),
+    };
+
+    Ok(DashboardResourceState {
+        default_account: account,
+        preferred_section: section.map(String::from),
+        preferred_resource: None,
+        preferred_tool: None,
+        preferred_skill: None,
+        preferred_prompt: prompt.map(String::from),
+    })
 }
 
 fn is_subscribable_resource_uri(uri: &str) -> bool {
@@ -2382,15 +2691,21 @@ fn resource_digest(uri: &str) -> Result<u64> {
     Ok(hasher.finish())
 }
 
-fn tool_visibility(tool_name: &str) -> Option<&'static [&'static str]> {
+fn tool_visibility(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
-        "zocli.app.snapshot" => Some(APP_ONLY_VISIBILITY),
-        "zocli.roots.list"
-        | "zocli.account.list"
-        | "zocli.account.current"
-        | "zocli.auth.status"
-        | DASHBOARD_TOOL_UPDATE_CHECK => Some(MODEL_AND_APP_VISIBILITY),
-        _ => None,
+        "zocli.app.snapshot" => APP_ONLY_VISIBILITY,
+        _ => MODEL_AND_APP_VISIBILITY,
+    }
+}
+
+fn tool_surface(tool_name: &str) -> &'static str {
+    match tool_name {
+        name if name.starts_with("zocli.mail.") => APP_MAIL_RESOURCE_URI,
+        name if name.starts_with("zocli.calendar.") => APP_CALENDAR_RESOURCE_URI,
+        name if name.starts_with("zocli.drive.") => APP_DRIVE_RESOURCE_URI,
+        "zocli.auth.status" => APP_AUTH_RESOURCE_URI,
+        "zocli.account.list" | "zocli.account.current" => APP_ACCOUNT_RESOURCE_URI,
+        _ => APP_RESOURCE_URI,
     }
 }
 
@@ -2489,7 +2804,7 @@ fn roots_list_tool_stdio(
                 let nested_params = message.get("params").cloned().unwrap_or(Value::Null);
 
                 if message.get("id").is_none() {
-                    handle_notification(nested_method, session);
+                    handle_notification(nested_method, &nested_params, session);
                     continue;
                 }
 
@@ -2545,6 +2860,7 @@ fn roots_list_tool_stdio(
 fn roots_tool_response(roots: Vec<Value>, ui_enabled: bool) -> Result<Value> {
     let structured = json!({
         "roots": roots,
+        "schemaVersion": "1.0",
     });
     let text = serde_json::to_string_pretty(&structured)
         .map_err(|err| ZocliError::Serialization(err.to_string()))?;
@@ -2560,8 +2876,14 @@ fn roots_tool_response(roots: Vec<Value>, ui_enabled: bool) -> Result<Value> {
             }
         ]),
     );
-    if ui_enabled && let Some(visibility) = tool_visibility("zocli.roots.list") {
-        response.insert("_meta".to_string(), app_meta(visibility));
+    if ui_enabled {
+        response.insert(
+            "_meta".to_string(),
+            app_meta(
+                tool_surface("zocli.roots.list"),
+                tool_visibility("zocli.roots.list"),
+            ),
+        );
     }
     Ok(Value::Object(response))
 }
@@ -2601,10 +2923,10 @@ fn requested_tool_name(params: &Value) -> Option<&str> {
     params.get("name").and_then(Value::as_str)
 }
 
-fn app_meta(visibility: &[&str]) -> Value {
+fn app_meta(resource_uri: &str, visibility: &[&str]) -> Value {
     json!({
         "ui": {
-            "resourceUri": APP_RESOURCE_URI,
+            "resourceUri": resource_uri,
             "visibility": visibility
         }
     })
@@ -2968,9 +3290,11 @@ fn tool_scope(tool_name: &str) -> Option<&'static str> {
     match tool_name {
         "zocli.auth.status" => Some("zocli.auth.read"),
         // Mail: read vs write
-        "zocli.mail.folders" | "zocli.mail.list" | "zocli.mail.search" | "zocli.mail.read" => {
-            Some("zocli.mail.read")
-        }
+        "zocli.mail.folders"
+        | "zocli.mail.list"
+        | "zocli.mail.search"
+        | "zocli.mail.read"
+        | "zocli.mail.attachment_export" => Some("zocli.mail.read"),
         "zocli.mail.send" | "zocli.mail.reply" | "zocli.mail.forward" => Some("zocli.mail.write"),
         // Calendar: read vs write
         "zocli.calendar.calendars" | "zocli.calendar.events" => Some("zocli.calendar.read"),

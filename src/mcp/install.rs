@@ -17,7 +17,6 @@ use crate::output::RenderedOutput;
 use super::skills;
 
 const SERVER_NAME: &str = "zocli";
-const LEGACY_SERVER_NAMES: &[&str] = &["yacli"];
 
 #[derive(Clone, Debug)]
 struct ServerRegistration {
@@ -180,28 +179,18 @@ fn reconcile_post_install(
                 if item.status == "already_installed" {
                     item.status = "installed";
                 }
-                item.detail = format!(
-                    "{}; migrated legacy Claude MCP entries in {}",
-                    item.detail,
-                    path.display()
-                );
             }
         }
         InstallClient::ClaudeDesktop => {
             let path = claude_desktop_config_path()?;
             let outcome =
-                reconcile_json_config_legacy_servers(&path, &[], "mcpServers", registration)?;
+                reconcile_json_config(&path, &[], "mcpServers", registration)?;
             if outcome.changed {
                 item.path = Some(path.display().to_string());
                 item.backup_path = outcome.backup_path;
                 if item.status == "already_installed" {
                     item.status = "installed";
                 }
-                item.detail = format!(
-                    "{}; removed legacy yacli entries from {}",
-                    item.detail,
-                    path.display()
-                );
             }
         }
         _ => {}
@@ -473,9 +462,7 @@ fn install_json_file(
     )?;
 
     let desired = json_server_entry(registration);
-    let removed_legacy = remove_legacy_server_entries(container);
     let requires_write = source_path != path
-        || removed_legacy
         || !matches!(container.get(SERVER_NAME), Some(current) if *current == desired);
     let status = if requires_write {
         container.insert(SERVER_NAME.to_string(), desired);
@@ -531,12 +518,11 @@ fn reconcile_claude_native_config(
         ))
     })?;
 
-    let mut changed = remove_legacy_servers_recursive(root_object);
     let mcp_servers = ensure_object(root_object, "mcpServers")?;
     let desired = claude_json_server_entry(registration);
-    if !matches!(mcp_servers.get(SERVER_NAME), Some(current) if *current == desired) {
+    let changed = !matches!(mcp_servers.get(SERVER_NAME), Some(current) if *current == desired);
+    if changed {
         mcp_servers.insert(SERVER_NAME.to_string(), desired);
-        changed = true;
     }
 
     if !changed && source_path == path {
@@ -559,7 +545,7 @@ fn reconcile_claude_native_config(
     })
 }
 
-fn reconcile_json_config_legacy_servers(
+fn reconcile_json_config(
     path: &Path,
     fallback_paths: &[PathBuf],
     top_level_key: &str,
@@ -577,10 +563,8 @@ fn reconcile_json_config_legacy_servers(
         })?,
         top_level_key,
     )?;
-    let removed_legacy = remove_legacy_server_entries(container);
     let desired = json_server_entry(registration);
-    let changed = removed_legacy
-        || !matches!(container.get(SERVER_NAME), Some(current) if *current == desired);
+    let changed = !matches!(container.get(SERVER_NAME), Some(current) if *current == desired);
     if !changed && source_path == path {
         return Ok(ReconcileOutcome {
             changed: false,
@@ -690,38 +674,6 @@ fn claude_json_server_entry(registration: &ServerRegistration) -> Value {
     Value::Object(entry)
 }
 
-fn remove_legacy_server_entries(container: &mut Map<String, Value>) -> bool {
-    let before = container.len();
-    container.retain(|key, _| !LEGACY_SERVER_NAMES.contains(&key.as_str()));
-    container.len() != before
-}
-
-fn remove_legacy_servers_recursive(object: &mut Map<String, Value>) -> bool {
-    let mut changed = false;
-    for (key, value) in object.iter_mut() {
-        if matches!(key.as_str(), "mcpServers" | "context_servers")
-            && let Some(container) = value.as_object_mut()
-            && remove_legacy_server_entries(container)
-        {
-            changed = true;
-        }
-
-        if let Some(child) = value.as_object_mut()
-            && remove_legacy_servers_recursive(child)
-        {
-            changed = true;
-        } else if let Some(items) = value.as_array_mut() {
-            for item in items {
-                if let Some(child) = item.as_object_mut()
-                    && remove_legacy_servers_recursive(child)
-                {
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed
-}
 
 fn write_backup(path: &Path) -> Result<String> {
     let timestamp = Utc::now().format("%Y%m%d%H%M%S");

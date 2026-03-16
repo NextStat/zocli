@@ -176,12 +176,11 @@ pub fn validate_account(name: &str, account: &AccountConfig) -> ValidationReport
         ));
     }
 
-    if account.account_id.trim().is_empty() {
-        errors.push("account_id must not be empty".to_string());
-    }
-
-    if account.client_id.trim().is_empty() {
-        errors.push("client_id must not be empty".to_string());
+    if account.oauth_client_id().is_none() {
+        errors.push(
+            "client_id must not be empty unless zocli is configured with a shared default OAuth client"
+                .to_string(),
+        );
     }
 
     if let Some(reference) = account.credential_ref.as_deref() {

@@ -1,6 +1,13 @@
 use std::collections::BTreeMap;
+use std::env;
 
 use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_OAUTH_CLIENT_ID_ENV: &str = "ZOCLI_DEFAULT_CLIENT_ID";
+pub const DEFAULT_OAUTH_CLIENT_SECRET_ENV: &str = "ZOCLI_DEFAULT_CLIENT_SECRET";
+const BUILTIN_DEFAULT_OAUTH_CLIENT_ID: Option<&str> = option_env!("ZOCLI_DEFAULT_CLIENT_ID");
+const BUILTIN_DEFAULT_OAUTH_CLIENT_SECRET: Option<&str> =
+    option_env!("ZOCLI_DEFAULT_CLIENT_SECRET");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountsFile {
@@ -26,7 +33,8 @@ pub struct AccountConfig {
     pub default: bool,
     /// Zoho datacenter suffix: "com", "eu", "in", "com.au", "jp", "zohocloud.ca", "sa", "uk"
     pub datacenter: String,
-    /// Zoho account ID (numeric, from Zoho admin panel)
+    /// Zoho account ID (numeric, auto-discovered after login when omitted)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_id: String,
     /// Zoho User ID (ZUID) — used for WorkDrive API
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,7 +42,8 @@ pub struct AccountConfig {
     /// Zoho organization ID (for WorkDrive team operations)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
-    /// OAuth2 client ID from Zoho API Console
+    /// OAuth2 client ID override. When empty, zocli resolves the shared/default OAuth app.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_id: String,
     /// OAuth2 client secret (plain string, optional for PKCE-only flows)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,9 +57,9 @@ pub struct NewAccountInput {
     pub email: String,
     pub default: bool,
     pub datacenter: String,
-    pub account_id: String,
+    pub account_id: Option<String>,
     pub org_id: Option<String>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
 }
 
@@ -60,13 +69,27 @@ impl AccountConfig {
             email: input.email,
             default: input.default,
             datacenter: input.datacenter,
-            account_id: input.account_id,
+            account_id: input.account_id.unwrap_or_default(),
             zuid: None,
             org_id: input.org_id,
-            client_id: input.client_id,
+            client_id: input.client_id.unwrap_or_default(),
             client_secret: input.client_secret,
             credential_ref: Some("store:oauth".to_string()),
         }
+    }
+
+    pub fn oauth_client_id(&self) -> Option<String> {
+        non_empty(self.client_id.as_str())
+            .map(ToString::to_string)
+            .or_else(default_oauth_client_id)
+    }
+
+    pub fn oauth_client_secret(&self) -> Option<String> {
+        self.client_secret
+            .as_deref()
+            .and_then(non_empty)
+            .map(ToString::to_string)
+            .or_else(default_oauth_client_secret)
     }
 
     /// OAuth2 authorization base URL for this account's datacenter.
@@ -128,4 +151,30 @@ pub fn datacenter_auth_url(dc: &str) -> String {
 
 const fn default_version() -> u32 {
     1
+}
+
+pub fn default_oauth_client_id() -> Option<String> {
+    env::var(DEFAULT_OAUTH_CLIENT_ID_ENV)
+        .ok()
+        .and_then(normalize_env_value)
+        .or_else(|| BUILTIN_DEFAULT_OAUTH_CLIENT_ID.and_then(|value| non_empty(value).map(ToString::to_string)))
+}
+
+pub fn default_oauth_client_secret() -> Option<String> {
+    env::var(DEFAULT_OAUTH_CLIENT_SECRET_ENV)
+        .ok()
+        .and_then(normalize_env_value)
+        .or_else(|| {
+            BUILTIN_DEFAULT_OAUTH_CLIENT_SECRET
+                .and_then(|value| non_empty(value).map(ToString::to_string))
+        })
+}
+
+fn normalize_env_value(value: String) -> Option<String> {
+    non_empty(value.trim()).map(ToString::to_string)
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }

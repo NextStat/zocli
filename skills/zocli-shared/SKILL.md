@@ -37,7 +37,7 @@ Use `--format table` for a human-readable view.
 
 | Command | Description |
 | --- | --- |
-| `zocli add <EMAIL> [ALIAS] --account-id <ID> --client-id <CLIENT_ID>` | Add an account |
+| `zocli add <EMAIL> [ALIAS]` | Add an account |
 | `zocli accounts` | List configured accounts |
 | `zocli use <ALIAS>` | Switch the current account |
 | `zocli whoami` | Show the current account |
@@ -53,6 +53,10 @@ Each service authenticates through Zoho OAuth2.
 | `zocli logout [SERVICE] [--profile ALIAS]` | Revoke one service or all services |
 
 `SERVICE` is one of `mail`, `calendar`, or `drive`. Without an argument, `zocli login` authenticates all three.
+
+Advanced override: `zocli add` also accepts `--client-id`, `--client-secret`, and `--account-id`, but the normal user flow should not need them.
+
+If the Zoho account is not in the default `com` datacenter, pass `--datacenter` explicitly, for example `zocli add user@company.com --datacenter eu`.
 
 `SERVICE` может быть `mail`, `calendar` или `drive`. Без аргумента `zocli login` авторизует все три сервиса.
 
