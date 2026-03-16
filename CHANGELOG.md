@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+### Changed
+
+- CLI output now defaults to `auto`: terminals get human-readable output, while pipes and scripts keep JSON by default.
+- `zocli update --check` and `zocli update` now print concise human messages in TTY sessions instead of raw field dumps.
+
+### Fixed
+
+- MCP HTTP test harness now retries ephemeral port binding instead of failing on transient `Address already in use` races.
+
 ## 0.2.1
 
 ### Fixed

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
+    Auto,
     Json,
     Table,
 }
@@ -70,7 +71,7 @@ pub struct Cli {
         long,
         value_enum,
         global = true,
-        default_value_t = OutputFormat::Json,
+        default_value_t = OutputFormat::Auto,
         value_name = "FORMAT",
         help = "Output format"
     )]

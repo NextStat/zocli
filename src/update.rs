@@ -552,16 +552,32 @@ fn render_output(format: OutputFormat, report: &UpdateStatusReport) -> Result<Re
         "target": report.target,
         "base_url": report.base_url,
     });
-    let table = [
-        format!("operation\t{}", report.operation),
-        format!("status\t{}", report.status),
-        format!("current_version\t{}", report.current_version),
-        format!("target_version\t{}", report.target_version),
-        format!("asset\t{}", report.asset),
-        format!("target\t{}", report.target),
-        format!("base_url\t{}", report.base_url),
-    ]
-    .join("\n");
+    let table = match (report.operation.as_str(), report.status.as_str()) {
+        ("update.check", "already_up_to_date") => {
+            format!("zocli is up to date ({})", report.current_version)
+        }
+        ("update.check", "update_available") => format!(
+            "Update available: {} -> {}\nRun: zocli update",
+            report.current_version, report.target_version
+        ),
+        ("update.apply", "updated") => format!(
+            "Updated zocli from {} to {}",
+            report.current_version, report.target_version
+        ),
+        ("update.apply", "already_up_to_date") => {
+            format!("zocli is already up to date ({})", report.current_version)
+        }
+        _ => [
+            format!("operation\t{}", report.operation),
+            format!("status\t{}", report.status),
+            format!("current_version\t{}", report.current_version),
+            format!("target_version\t{}", report.target_version),
+            format!("asset\t{}", report.asset),
+            format!("target\t{}", report.target),
+            format!("base_url\t{}", report.base_url),
+        ]
+        .join("\n"),
+    };
 
     Ok(RenderedOutput {
         format,
@@ -658,6 +674,23 @@ mod tests {
         let report = build_update_report("update.check", "0.2.1", &plan, None);
         assert_eq!(report.status, "already_up_to_date");
         assert_eq!(report.target_version, "0.2.0");
+    }
+
+    #[test]
+    fn render_output_uses_human_message_for_up_to_date_checks() {
+        let report = UpdateStatusReport {
+            operation: "update.check".to_string(),
+            status: "already_up_to_date".to_string(),
+            current_version: "0.2.1".to_string(),
+            target_version: "0.2.1".to_string(),
+            requested_version: "latest".to_string(),
+            asset: "zocli-aarch64-apple-darwin.tar.gz".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            base_url: "https://github.com/NextStat/zocli/releases/latest/download".to_string(),
+        };
+
+        let rendered = render_output(OutputFormat::Table, &report).expect("rendered");
+        assert_eq!(rendered.table, "zocli is up to date (0.2.1)");
     }
 
     #[test]

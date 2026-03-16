@@ -26,43 +26,56 @@ impl TestHttpServer {
     }
 
     fn spawn_with_args_envs(args: &[&str], envs: &[(&str, &str)]) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local addr").to_string();
-        drop(listener);
+        for attempt in 0..10 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local addr").to_string();
+            drop(listener);
 
-        let mut command = Command::new(cargo_bin("zocli"));
-        command
-            .args(["mcp", "--transport", "http", "--listen", &addr])
-            .env("ZOCLI_SECRET_BACKEND", "file")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        for (key, value) in envs {
-            command.env(key, value);
-        }
-        let mut child = command.spawn().expect("spawn zocli mcp http");
+            let mut command = Command::new(cargo_bin("zocli"));
+            command
+                .args(["mcp", "--transport", "http", "--listen", &addr])
+                .env("ZOCLI_SECRET_BACKEND", "file")
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            for (key, value) in envs {
+                command.env(key, value);
+            }
+            let mut child = command.spawn().expect("spawn zocli mcp http");
 
-        for _ in 0..200 {
-            if let Some(status) = child.try_wait().expect("poll child status") {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
+            let mut bind_conflict = false;
+            for _ in 0..200 {
+                if let Some(status) = child.try_wait().expect("poll child status") {
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stderr.take() {
+                        let _ = pipe.read_to_string(&mut stderr);
+                    }
+                    if stderr.contains("Address already in use") && attempt < 9 {
+                        bind_conflict = true;
+                        break;
+                    }
+                    panic!("HTTP MCP server exited early with {status}: {stderr}");
                 }
-                panic!("HTTP MCP server exited early with {status}: {stderr}");
+                if http_transport_ready(&addr) {
+                    return Self { child, addr };
+                }
+                thread::sleep(Duration::from_millis(50));
             }
-            if http_transport_ready(&addr) {
-                return Self { child, addr };
+
+            if bind_conflict {
+                continue;
             }
-            thread::sleep(Duration::from_millis(50));
+
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("HTTP MCP server did not start at {addr}. stderr: {stderr}");
         }
 
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("HTTP MCP server did not start at {addr}. stderr: {stderr}");
+        panic!("HTTP MCP server failed to bind an ephemeral port after repeated retries");
     }
 
     fn url(&self) -> String {
