@@ -1,0 +1,196 @@
+#!/bin/sh
+set -eu
+
+VERSION=""
+BASE_URL=""
+OUTPUT=""
+SHA_MACOS_ARM64=""
+SHA_MACOS_X64=""
+SHA_LINUX_ARM64=""
+SHA_LINUX_X64=""
+
+usage() {
+    cat <<'EOF'
+Generate a Homebrew formula for a released zocli version.
+
+Usage:
+  generate-homebrew-formula.sh \
+    --version VERSION \
+    --base-url URL \
+    --output PATH \
+    [--sha256-macos-arm64 SHA256] \
+    [--sha256-macos-x64 SHA256] \
+    [--sha256-linux-arm64 SHA256] \
+    [--sha256-linux-x64 SHA256]
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --base-url)
+            BASE_URL="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT="$2"
+            shift 2
+            ;;
+        --sha256-macos-arm64)
+            SHA_MACOS_ARM64="$2"
+            shift 2
+            ;;
+        --sha256-macos-x64)
+            SHA_MACOS_X64="$2"
+            shift 2
+            ;;
+        --sha256-linux-arm64)
+            SHA_LINUX_ARM64="$2"
+            shift 2
+            ;;
+        --sha256-linux-x64)
+            SHA_LINUX_X64="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$VERSION" ] || [ -z "$BASE_URL" ] || [ -z "$OUTPUT" ]; then
+    usage >&2
+    exit 1
+fi
+
+if [ -z "$SHA_MACOS_ARM64" ] && [ -z "$SHA_MACOS_X64" ] && [ -z "$SHA_LINUX_ARM64" ] && [ -z "$SHA_LINUX_X64" ]; then
+    echo "At least one platform checksum is required." >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+{
+    cat <<EOF
+class Zocli < Formula
+  desc "Zoho Mail, Calendar, and WorkDrive CLI for humans and AI agents"
+  homepage "https://github.com/NextStat/zocli"
+  version "${VERSION}"
+  license "MIT"
+
+EOF
+
+    if [ -n "$SHA_MACOS_ARM64" ] || [ -n "$SHA_MACOS_X64" ]; then
+        cat <<'EOF'
+  on_macos do
+EOF
+        if [ -n "$SHA_MACOS_ARM64" ] && [ -n "$SHA_MACOS_X64" ]; then
+            cat <<EOF
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/zocli-aarch64-apple-darwin.tar.gz"
+      sha256 "${SHA_MACOS_ARM64}"
+    else
+      url "${BASE_URL}/zocli-x86_64-apple-darwin.tar.gz"
+      sha256 "${SHA_MACOS_X64}"
+    end
+
+EOF
+        elif [ -n "$SHA_MACOS_ARM64" ]; then
+            cat <<EOF
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/zocli-aarch64-apple-darwin.tar.gz"
+      sha256 "${SHA_MACOS_ARM64}"
+    else
+      odie "zocli Homebrew packages are not published for macOS x86_64 yet."
+    end
+
+EOF
+        else
+            cat <<EOF
+    if Hardware::CPU.intel?
+      url "${BASE_URL}/zocli-x86_64-apple-darwin.tar.gz"
+      sha256 "${SHA_MACOS_X64}"
+    else
+      odie "zocli Homebrew packages are not published for macOS arm64 yet."
+    end
+
+EOF
+        fi
+        cat <<'EOF'
+  end
+
+EOF
+    fi
+
+    if [ -n "$SHA_LINUX_ARM64" ] || [ -n "$SHA_LINUX_X64" ]; then
+        cat <<EOF
+  on_linux do
+EOF
+        if [ -n "$SHA_LINUX_ARM64" ] && [ -n "$SHA_LINUX_X64" ]; then
+            cat <<EOF
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/zocli-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "${SHA_LINUX_ARM64}"
+    elsif Hardware::CPU.intel?
+      url "${BASE_URL}/zocli-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "${SHA_LINUX_X64}"
+    else
+      odie "zocli Homebrew packages are not published for this Linux CPU."
+    end
+  end
+
+EOF
+        elif [ -n "$SHA_LINUX_ARM64" ]; then
+            cat <<EOF
+    if Hardware::CPU.arm?
+      url "${BASE_URL}/zocli-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "${SHA_LINUX_ARM64}"
+    else
+      odie "zocli Homebrew packages are not published for Linux x86_64 yet."
+    end
+  end
+
+EOF
+        else
+            cat <<EOF
+    if Hardware::CPU.intel?
+      url "${BASE_URL}/zocli-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "${SHA_LINUX_X64}"
+    else
+      odie "zocli Homebrew packages are not published for Linux arm64 yet."
+    end
+  end
+
+EOF
+        fi
+    else
+        cat <<'EOF'
+  on_linux do
+    odie "zocli Homebrew packages are not published for Linux yet. Use install.sh or cargo install."
+  end
+
+EOF
+    fi
+
+    cat <<'EOF'
+  def install
+    bin.install "zocli"
+    doc.install "README.md", "LICENSE"
+  end
+
+  test do
+    output = shell_output("#{bin}/zocli --help")
+    assert_match "Zoho Mail, Calendar, and WorkDrive", output
+  end
+end
+EOF
+} > "$OUTPUT"

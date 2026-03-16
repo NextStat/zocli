@@ -1,0 +1,8 @@
+/target
+.DS_Store
+.env
+/AGENTS.md
+/docs/adr/
+/audit/
+/accounts.toml
+/credentials.toml

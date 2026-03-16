@@ -1,0 +1,236 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Smoke stable product surface
+        run: sh ./scripts/smoke-product-surface.sh target/debug/zocli
+      - name: Test
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  install-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: zocli-x86_64-unknown-linux-gnu.tar.gz
+            package_kind: unix
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: zocli-aarch64-unknown-linux-gnu.tar.gz
+            package_kind: unix
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: zocli-aarch64-apple-darwin.tar.gz
+            package_kind: unix
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: zocli-x86_64-pc-windows-msvc.zip
+            package_kind: windows
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package Unix release asset
+        if: matrix.package_kind == 'unix'
+        shell: bash
+        run: |
+          mkdir -p dist
+          asset_path="$(sh ./scripts/package-release.sh --target "${{ matrix.target }}" --binary "target/${{ matrix.target }}/release/zocli" --output-dir dist)"
+          asset_name="$(basename "$asset_path")"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$asset_path" | awk -v name="$asset_name" '{print $1 "  " name}' > dist/SHA256SUMS
+          else
+            sha256sum "$asset_path" | awk -v name="$asset_name" '{print $1 "  " name}' > dist/SHA256SUMS
+          fi
+      - name: Package Windows release asset
+        if: matrix.package_kind == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stageDir = Join-Path $env:RUNNER_TEMP "zocli-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/zocli.exe" (Join-Path $stageDir "zocli.exe")
+          Copy-Item "README.md" (Join-Path $stageDir "README.md")
+          Copy-Item "LICENSE" (Join-Path $stageDir "LICENSE")
+          $assetPath = Join-Path (Resolve-Path dist) "${{ matrix.asset }}"
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $assetPath -Force
+          $hash = (Get-FileHash -Path $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ${{ matrix.asset }}" | Out-File -FilePath (Join-Path (Resolve-Path dist) "SHA256SUMS") -Encoding ascii
+      - name: Start local asset server (Unix)
+        if: matrix.package_kind == 'unix'
+        shell: bash
+        run: |
+          python3 -m http.server 8877 --bind 127.0.0.1 --directory dist >/tmp/zocli-install-smoke.log 2>&1 &
+          echo $! > server.pid
+          sleep 2
+      - name: Smoke Unix installer
+        if: matrix.package_kind == 'unix'
+        shell: bash
+        run: |
+          install_dir="$RUNNER_TEMP/bin"
+          sh ./scripts/install.sh --base-url http://127.0.0.1:8877 --install-dir "$install_dir"
+          "$install_dir/zocli" --format json guide --topic drive
+      - name: Smoke Windows installer
+        if: matrix.package_kind == 'windows'
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "bin"
+          $stdoutLog = Join-Path $env:RUNNER_TEMP "zocli-install-smoke.stdout.log"
+          $stderrLog = Join-Path $env:RUNNER_TEMP "zocli-install-smoke.stderr.log"
+          $process = Start-Process python -WorkingDirectory (Resolve-Path .) -ArgumentList '-m','http.server','8877','--bind','127.0.0.1','--directory','dist' -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:8877/SHA256SUMS" -UseBasicParsing | Out-Null
+                $ready = $true
+                break
+              }
+              catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) {
+              if (Test-Path $stdoutLog) {
+                Get-Content $stdoutLog
+              }
+              if (Test-Path $stderrLog) {
+                Get-Content $stderrLog
+              }
+              throw "Local asset server did not become ready on Windows."
+            }
+            ./scripts/install.ps1 -BaseUrl http://127.0.0.1:8877 -InstallDir $installDir
+            & (Join-Path $installDir "zocli.exe") --format json guide --topic drive
+          }
+          finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
+
+  homebrew-smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Package arm64 release asset
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          mkdir -p dist
+          asset_path="$(sh ./scripts/package-release.sh --target aarch64-apple-darwin --binary target/release/zocli --output-dir dist)"
+          asset_sha="$(shasum -a 256 "$asset_path" | awk '{print $1}')"
+          sh ./scripts/generate-homebrew-formula.sh \
+            --version "$version" \
+            --base-url "http://127.0.0.1:8877" \
+            --output dist/zocli.rb \
+            --sha256-macos-arm64 "$asset_sha"
+          tap_dir="$RUNNER_TEMP/homebrew-zocli-smoke"
+          mkdir -p "$tap_dir/Formula"
+          cp dist/zocli.rb "$tap_dir/Formula/zocli.rb"
+          git -C "$tap_dir" init -b main
+          git -C "$tap_dir" config user.name "GitHub Actions"
+          git -C "$tap_dir" config user.email "actions@github.com"
+          git -C "$tap_dir" add Formula/zocli.rb
+          git -C "$tap_dir" commit -m "Add zocli formula"
+          echo "TAP_DIR=$tap_dir" >> "$GITHUB_ENV"
+      - name: Start local asset server
+        shell: bash
+        run: |
+          python3 -m http.server 8877 --bind 127.0.0.1 --directory dist >/tmp/zocli-homebrew-smoke.log 2>&1 &
+          echo $! > server.pid
+          sleep 2
+      - name: Smoke Homebrew formula
+        shell: bash
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew tap local/zocli-smoke "$TAP_DIR"
+          brew install local/zocli-smoke/zocli
+          "$(brew --prefix)/bin/zocli" --format json guide --topic drive
+      - name: Cleanup Homebrew formula
+        if: always()
+        shell: bash
+        run: |
+          brew uninstall zocli || true
+          brew untap local/zocli-smoke || true
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" || true
+          fi
+
+  winget-manifest-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Package Windows asset and generate manifests
+        shell: pwsh
+        run: |
+          $versionLine = Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' | Select-Object -First 1
+          $version = $versionLine.Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stageDir = Join-Path $env:RUNNER_TEMP "zocli-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/zocli.exe" (Join-Path $stageDir "zocli.exe")
+          Copy-Item "README.md" (Join-Path $stageDir "README.md")
+          Copy-Item "LICENSE" (Join-Path $stageDir "LICENSE")
+          $assetPath = Join-Path (Resolve-Path dist) "zocli-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $assetPath -Force
+          $assetHash = (Get-FileHash -Path $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          sh ./scripts/generate-winget-manifests.sh `
+            --version "$version" `
+            --base-url "http://127.0.0.1:8877" `
+            --output-dir dist/winget-manifests `
+            --sha256-windows-x64 $assetHash
+      - name: Start local asset server for winget validation
+        shell: pwsh
+        run: |
+          $process = Start-Process python -ArgumentList '-m','http.server','8877','--bind','127.0.0.1','--directory','dist' -PassThru
+          $process.Id | Out-File server.pid -Encoding ascii
+          Start-Sleep -Seconds 2
+      - name: Validate winget manifests
+        shell: pwsh
+        run: |
+          winget validate --manifest (Resolve-Path dist/winget-manifests/NextStat.zocli) --disable-interactivity
+      - name: Cleanup winget validation server
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path server.pid) {
+            $serverPid = Get-Content server.pid
+            Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+          }
