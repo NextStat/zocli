@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head><title>MCP Apps Test Host</title></head>
+<body>
+<iframe id="app" src="/app.html" style="width:100%;height:100vh;border:none;"></iframe>
+<script>
+(function () {
+  "use strict";
+  var iframe = document.getElementById("app");
+  var sent = [];
+  var state = "created";
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== iframe.contentWindow) {
+      return;
+    }
+    var data = event.data;
+    if (data && data.jsonrpc === "2.0") {
+      sent.push(JSON.parse(JSON.stringify(data)));
+      if (data.method === "ui/initialize") state = "initialized";
+      if (data.method === "ui/notifications/initialized") state = "view_ready";
+      if (data.id && data.result && Object.keys(data.result).length === 0) state = "torn_down";
+    }
+  });
+
+  window.__HARNESS__ = {
+    sent: sent,
+    state: function () { return state; },
+    inject: function (message) {
+      iframe.contentWindow.postMessage(message, "*");
+    },
+    waitFor: async function (predicateSource, timeoutMs) {
+      var start = Date.now();
+      var predicate = new Function("sent", "return (" + predicateSource + ")(sent);");
+      while (Date.now() - start < timeoutMs) {
+        var match = predicate(sent);
+        if (match) return match;
+        await new Promise(function (resolve) { setTimeout(resolve, 50); });
+      }
+      return null;
+    }
+  };
+})();
+</script>
+</body>
+</html>

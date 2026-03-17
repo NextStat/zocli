@@ -19,6 +19,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+      - name: Verify Chromium available
+        run: which chromium-browser || which chromium
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -26,6 +29,8 @@ jobs:
       - name: Smoke stable product surface
         run: sh ./scripts/smoke-product-surface.sh target/debug/zocli
       - name: Test
+        env:
+          BROWSER_TESTS_REQUIRED: "1"
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

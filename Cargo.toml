@@ -43,6 +43,8 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service"] }
 
 [dev-dependencies]
+anyhow = "1.0"
 assert_cmd = "2.0"
+headless_chrome = "1"
 mockito = "1.7"
 predicates = "3.1"
