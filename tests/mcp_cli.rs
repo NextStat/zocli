@@ -411,6 +411,7 @@ fn mcp_install_invokes_gemini_native_cli() {
     assert!(log.contains("-e"));
     assert!(log.contains("ZOCLI_CONFIG_DIR=/tmp/zocli-config"));
     assert!(log.contains("zocli"));
+    assert!(!log.contains("--"));
 }
 
 #[test]

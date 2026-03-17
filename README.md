@@ -72,7 +72,7 @@ zocli update --check
 For a private release mirror:
 
 ```bash
-export ZOCLI_UPDATE_BASE_URL='https://mirror.example.test/releases/download/v0.2.0'
+export ZOCLI_UPDATE_BASE_URL='https://mirror.example.test/releases/download/v0.2.4'
 zocli update --check
 ```
 

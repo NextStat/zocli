@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4
+
+### Changed
+
+- MCP Apps now ship with browser-backed conformance coverage in the release gate, using a real Chromium iframe and `postMessage` lifecycle instead of HTML-shape-only checks.
+- CI now treats browser-backed MCP Apps verification as mandatory, so release candidates cannot silently skip the Chromium-based conformance suite.
+
+### Fixed
+
+- `zocli mcp install --client gemini` now uses the real Gemini CLI stdio registration shape and succeeds against the live Gemini host instead of failing on an invalid `mcp add` argument form.
+- real-host MCP install verification now covers Claude, Codex, Gemini, and Cursor registration paths against live local surfaces instead of only stubbed CLI scripts.
+
 ## 0.2.3
 
 ### Changed

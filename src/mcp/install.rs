@@ -785,7 +785,6 @@ fn build_gemini_add_args(registration: &ServerRegistration) -> Vec<String> {
                 args.push("-e".to_string());
                 args.push(format!("{key}={value}"));
             }
-            args.push("--".to_string());
             args.push(registration.command.clone().unwrap_or_default());
             args.extend(registration.args.clone());
         }
@@ -1139,6 +1138,33 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| { pair[0] == "-e" && pair[1] == "ZOCLI_CONFIG_DIR=/tmp/zocli-config" })
+        );
+    }
+
+    #[test]
+    fn gemini_add_args_use_command_as_required_positional() {
+        let registration = ServerRegistration {
+            transport: McpTransportArg::Stdio,
+            command: Some("/usr/local/bin/zocli".to_string()),
+            args: vec!["mcp".to_string()],
+            env: BTreeMap::new(),
+            url: None,
+        };
+
+        let args = build_gemini_add_args(&registration);
+
+        assert!(!args.iter().any(|arg| arg == "--"));
+        assert_eq!(
+            args,
+            vec![
+                "mcp".to_string(),
+                "add".to_string(),
+                "-s".to_string(),
+                "user".to_string(),
+                "zocli".to_string(),
+                "/usr/local/bin/zocli".to_string(),
+                "mcp".to_string(),
+            ]
         );
     }
 }
