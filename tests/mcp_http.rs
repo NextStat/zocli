@@ -1793,6 +1793,19 @@ fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
         false
     );
 
+    // 2b. View confirms initialization (required before ui/message and ui/open-link)
+    let _notif = post_json(
+        &client,
+        &server.url(),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "ui/notifications/initialized",
+            "params": {}
+        }),
+        Some(&session_id),
+        None,
+    );
+
     // 3. ui/request-display-mode
     let display = post_json(
         &client,
@@ -1801,14 +1814,14 @@ fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "ui/request-display-mode",
-            "params": { "mode": "floating" }
+            "params": { "mode": "fullscreen" }
         }),
         Some(&session_id),
         None,
     );
     assert!(display.status().is_success());
     let display_payload: Value = display.json().expect("display mode json");
-    assert_eq!(display_payload["result"]["mode"], "floating");
+    assert_eq!(display_payload["result"]["mode"], "fullscreen");
 
     // 4. ui/update-model-context
     let update_ctx = post_json(
@@ -1825,7 +1838,8 @@ fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
     );
     assert!(update_ctx.status().is_success());
     let update_ctx_payload: Value = update_ctx.json().expect("update context json");
-    assert_eq!(update_ctx_payload["result"], json!({ "accepted": true }));
+    assert_eq!(update_ctx_payload["result"]["accepted"], true);
+    assert_eq!(update_ctx_payload["result"]["revision"], 1);
 
     // 5. ui/message
     let message = post_json(
@@ -1842,7 +1856,8 @@ fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
     );
     assert!(message.status().is_success());
     let message_payload: Value = message.json().expect("ui/message json");
-    assert_eq!(message_payload["result"], json!({ "accepted": true }));
+    assert_eq!(message_payload["result"]["accepted"], true);
+    assert_eq!(message_payload["result"]["stored"], "hello from test");
 
     // 6. ui/open-link
     let open_link = post_json(
@@ -1859,7 +1874,8 @@ fn mcp_http_ui_full_lifecycle_initialize_interact_teardown() {
     );
     assert!(open_link.status().is_success());
     let open_link_payload: Value = open_link.json().expect("ui/open-link json");
-    assert_eq!(open_link_payload["result"], json!({ "accepted": true }));
+    assert_eq!(open_link_payload["result"]["accepted"], true);
+    assert_eq!(open_link_payload["result"]["url"], "https://example.com");
 
     // 7. ui/resource-teardown
     let teardown = post_json(

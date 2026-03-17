@@ -833,6 +833,15 @@
         const APP_VIEW_STATE_STORAGE_KEY = "zocli.mcp.dashboard.view-state.v1";
         const APP_RUNTIME_STATE_STORAGE_KEY = "zocli.mcp.dashboard.runtime-state.v1";
 
+        const SURFACE_CONTROLLERS = {
+          dashboard: { defaultPanel: null, defaultTool: null, defaultPrompt: null },
+          mail:      { defaultPanel: "panel-prompts", defaultTool: "zocli.mail.list", defaultPrompt: "mail" },
+          calendar:  { defaultPanel: "panel-prompts", defaultTool: "zocli.calendar.events", defaultPrompt: "calendar" },
+          drive:     { defaultPanel: "panel-prompts", defaultTool: "zocli.drive.list", defaultPrompt: "drive" },
+          auth:      { defaultPanel: "panel-auth", defaultTool: "zocli.auth.status", defaultPrompt: null },
+          account:   { defaultPanel: "panel-auth", defaultTool: "zocli.account.current", defaultPrompt: null },
+        };
+
         function sanitizeBootstrapState(value) {
           const source = value && typeof value === "object" ? value : {};
           return {
@@ -2064,8 +2073,17 @@
                   : "Display mode unavailable";
         }
 
+        var hostOrigin = null;
+
         function postMessage(message) {
-          transportTarget.postMessage(message, "*");
+          // Use captured host origin when available; fall back to "*" only
+          // before the first message arrives (e.g. during ui/initialize).
+          // Trade-off: MCP Apps spec requires the view to send ui/initialize
+          // before receiving any host message, so "*" is necessary for the
+          // first outbound frame. After onMessage captures hostOrigin from
+          // the first inbound JSON-RPC message, all subsequent calls are
+          // origin-locked. This is the spec-minimum safe pattern.
+          transportTarget.postMessage(message, hostOrigin || "*");
         }
 
         function sendResponse(id, result) {
@@ -2963,6 +2981,11 @@
             return;
           }
 
+          // Capture host origin from the first valid JSON-RPC message.
+          if (!hostOrigin && event.origin && event.origin !== "null") {
+            hostOrigin = event.origin;
+          }
+
           if (Object.prototype.hasOwnProperty.call(message, "id") && pending.has(message.id)) {
             const deferred = pending.get(message.id);
             pending.delete(message.id);
@@ -2979,10 +3002,43 @@
           }
         }
 
+        function extractSurfaceName(resourceUri) {
+          try {
+            var url = new URL(resourceUri);
+            var path = url.pathname.replace(/^\//, "");
+            return SURFACE_CONTROLLERS[path] ? path : "dashboard";
+          } catch (_e) {
+            return "dashboard";
+          }
+        }
+
+        function applySurfaceController(surfaceName) {
+          var controller = SURFACE_CONTROLLERS[surfaceName];
+          if (!controller) {
+            return;
+          }
+          if (controller.defaultPanel && !state.bootstrap.preferredSection) {
+            var section = Object.entries(SECTION_TO_PANEL_ID).find(function (entry) {
+              return entry[1] === controller.defaultPanel;
+            });
+            if (section) {
+              state.bootstrap.preferredSection = section[0];
+            }
+          }
+          if (controller.defaultTool && !state.bootstrap.preferredTool) {
+            state.bootstrap.preferredTool = controller.defaultTool;
+          }
+          if (controller.defaultPrompt && !state.bootstrap.preferredPrompt) {
+            state.bootstrap.preferredPrompt = controller.defaultPrompt;
+          }
+        }
+
         async function initializeApp() {
           setStatus("running", "Negotiating host capabilities");
           elements.transportHint.textContent = "Transport: window.postMessage bridge active";
           restorePersistedRuntimeState();
+          var surfaceName = extractSurfaceName(state.bootstrap.resourceUri || APP_RESOURCE_URI);
+          applySurfaceController(surfaceName);
           updateMetrics();
           renderHostContext();
           renderToolInput(state.lastToolInput);
@@ -3044,7 +3100,7 @@
               protocolVersion: APP_PROTOCOL_VERSION,
               appInfo: APP_INFO,
               appCapabilities: {
-                availableDisplayModes: ["inline", "fullscreen"],
+                availableDisplayModes: ["inline", "fullscreen", "pip"],
               },
             });
             state.hostInit = result;

@@ -70,6 +70,14 @@ const RESOURCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
 const PROTECTED_RESOURCE_MCP_METADATA_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
+// MCP Apps spec-correct display modes (SEP-1865, 2026-01-26)
+const DISPLAY_MODE_INLINE: &str = "inline";
+const DISPLAY_MODE_FULLSCREEN: &str = "fullscreen";
+const DISPLAY_MODE_PIP: &str = "pip";
+const DISPLAY_MODES: &[&str] = &[DISPLAY_MODE_INLINE, DISPLAY_MODE_FULLSCREEN, DISPLAY_MODE_PIP];
+
+const SUMMARY_MAX_CHARS: usize = 280;
+
 const DASHBOARD_SECTION_TOOLS: &str = "tools";
 const DASHBOARD_SECTION_PROMPTS: &str = "prompts";
 const DASHBOARD_SECTION_RESOURCES: &str = "resources";
@@ -120,11 +128,66 @@ struct MailReplyToolRequest {
     cc: Vec<String>,
 }
 
+// ── MCP Apps UI lifecycle state machine ──
+// States: NotInitialized → Active(resource, revision) → NotInitialized (after teardown)
+// Gate: all ui/* methods except ui/initialize require Active state.
+// host-context revision increments on each ui/update-model-context call.
+
+#[derive(Debug, Clone)]
+enum UiLifecycleState {
+    /// No ui/initialize has been called (or teardown completed).
+    NotInitialized,
+    /// ui/initialize was called. View may be loading or fully initialized.
+    Active {
+        resource_uri: Option<String>,
+        host_context_revision: u64,
+        view_initialized: bool,
+    },
+}
+
+impl UiLifecycleState {
+    fn is_active(&self) -> bool {
+        matches!(self, UiLifecycleState::Active { .. })
+    }
+
+    /// True only if Active AND the view has confirmed initialization.
+    fn is_view_ready(&self) -> bool {
+        matches!(
+            self,
+            UiLifecycleState::Active {
+                view_initialized: true,
+                ..
+            }
+        )
+    }
+
+    /// Returns the active resource URI, if any.
+    fn active_resource_uri(&self) -> Option<&str> {
+        match self {
+            UiLifecycleState::Active {
+                resource_uri: Some(uri),
+                ..
+            } => Some(uri.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns the current host-context revision, or 0 if not active.
+    fn revision(&self) -> u64 {
+        match self {
+            UiLifecycleState::Active {
+                host_context_revision,
+                ..
+            } => *host_context_revision,
+            _ => 0,
+        }
+    }
+}
+
 struct SessionState {
     initialized: bool,
     ui_enabled: bool,
-    ui_initialized: bool,
-    ui_active_resource: Option<String>,
+    ui_lifecycle: UiLifecycleState,
     supports_resource_subscriptions: bool,
     supports_roots_requests: bool,
     roots_list_changed_supported: bool,
@@ -133,6 +196,9 @@ struct SessionState {
     next_outbound_request_id: u64,
     resource_subscriptions: BTreeSet<String>,
     stdio_message_format: StdioMessageFormat,
+    last_message_content: Option<String>,
+    last_open_link_url: Option<String>,
+    last_model_context: Option<Value>,
 }
 
 impl SessionState {
@@ -140,8 +206,7 @@ impl SessionState {
         Self {
             initialized: false,
             ui_enabled: false,
-            ui_initialized: false,
-            ui_active_resource: None,
+            ui_lifecycle: UiLifecycleState::NotInitialized,
             supports_resource_subscriptions: true,
             supports_roots_requests: false,
             roots_list_changed_supported: false,
@@ -150,6 +215,9 @@ impl SessionState {
             next_outbound_request_id: 1,
             resource_subscriptions: BTreeSet::new(),
             stdio_message_format: StdioMessageFormat::ContentLength,
+            last_message_content: None,
+            last_open_link_url: None,
+            last_model_context: None,
         }
     }
 
@@ -157,8 +225,7 @@ impl SessionState {
         Self {
             initialized: false,
             ui_enabled: false,
-            ui_initialized: false,
-            ui_active_resource: None,
+            ui_lifecycle: UiLifecycleState::NotInitialized,
             supports_resource_subscriptions: true,
             supports_roots_requests: false,
             roots_list_changed_supported: false,
@@ -167,6 +234,9 @@ impl SessionState {
             next_outbound_request_id: 1,
             resource_subscriptions: BTreeSet::new(),
             stdio_message_format: StdioMessageFormat::ContentLength,
+            last_message_content: None,
+            last_open_link_url: None,
+            last_model_context: None,
         }
     }
 }
@@ -893,11 +963,18 @@ fn handle_notification(method: &str, params: &Value, session: &mut SessionState)
             session.cached_roots = None;
         }
         // MCP Apps lifecycle notifications (View → Host, host may proxy).
-        // Track state transitions — these are fire-and-forget but observable.
         "ui/notifications/initialized" => {
-            session.ui_initialized = true;
-            if let Some(uri) = params.get("resourceUri").and_then(Value::as_str) {
-                session.ui_active_resource = Some(uri.to_string());
+            // View confirms it loaded. Update state if we're in Active.
+            if let UiLifecycleState::Active {
+                ref mut resource_uri,
+                ref mut view_initialized,
+                ..
+            } = session.ui_lifecycle
+            {
+                *view_initialized = true;
+                if let Some(uri) = params.get("resourceUri").and_then(Value::as_str) {
+                    *resource_uri = Some(uri.to_string());
+                }
             }
         }
         "ui/notifications/tool-input"
@@ -980,9 +1057,13 @@ fn handle_request(
         "resources/unsubscribe" => unsubscribe_resource(params, session, poller),
         "resources/read" => read_resource(params),
 
-        // ── MCP Apps lifecycle (View ↔ Host, host may proxy to server) ──
+        // ── MCP Apps lifecycle state machine ──
         "ui/initialize" => {
-            session.ui_initialized = true;
+            session.ui_lifecycle = UiLifecycleState::Active {
+                resource_uri: None,
+                host_context_revision: 0,
+                view_initialized: false,
+            };
             Ok(json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {
@@ -995,41 +1076,112 @@ fn handle_request(
                 }
             }))
         }
-        // All remaining ui/* methods require a prior ui/initialize call.
+        // All remaining ui/* methods require Active state.
         "ui/update-model-context"
         | "ui/message"
         | "ui/request-display-mode"
         | "ui/open-link"
         | "ui/resource-teardown"
-            if !session.ui_initialized =>
+            if !session.ui_lifecycle.is_active() =>
         {
             Err(ZocliError::UnsupportedOperation(
                 "ui/initialize must be called before other ui/* methods".to_string(),
             ))
         }
         "ui/update-model-context" => {
-            Ok(json!({ "accepted": true }))
+            if let UiLifecycleState::Active {
+                ref mut host_context_revision,
+                ..
+            } = session.ui_lifecycle
+            {
+                *host_context_revision += 1;
+            }
+            session.last_model_context = Some(params.clone());
+            Ok(json!({ "accepted": true, "revision": session.ui_lifecycle.revision() }))
         }
         "ui/message" => {
-            Ok(json!({ "accepted": true }))
+            // Gate: view must have confirmed initialization before it can send messages.
+            if !session.ui_lifecycle.is_view_ready() {
+                return Err(ZocliError::UnsupportedOperation(
+                    "ui/message requires view to be initialized (ui/notifications/initialized must be sent first)".to_string(),
+                ));
+            }
+            // Validate that at least `content` or `text` is present.
+            let has_content = params
+                .get("content")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+            let has_text = params
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !has_content && !has_text {
+                return Err(ZocliError::Validation(
+                    "ui/message requires a non-empty 'content' or 'text' field".to_string(),
+                ));
+            }
+            let stored = params
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| params.get("content").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            session.last_message_content = Some(stored.clone());
+            Ok(json!({ "accepted": true, "stored": stored }))
         }
         "ui/request-display-mode" => {
             let mode = params
                 .get("mode")
                 .and_then(Value::as_str)
-                .unwrap_or("inline");
-            let validated = match mode {
-                "inline" | "floating" | "full-window" => mode,
-                _ => "inline",
+                .unwrap_or(DISPLAY_MODE_INLINE);
+            let validated = if DISPLAY_MODES.contains(&mode) {
+                mode
+            } else {
+                DISPLAY_MODE_INLINE
             };
             Ok(json!({ "mode": validated }))
         }
         "ui/open-link" => {
-            Ok(json!({ "accepted": true }))
+            // Gate: view must have confirmed initialization before requesting link opens.
+            if !session.ui_lifecycle.is_view_ready() {
+                return Err(ZocliError::UnsupportedOperation(
+                    "ui/open-link requires view to be initialized (ui/notifications/initialized must be sent first)".to_string(),
+                ));
+            }
+            // Validate that a URL was provided.
+            let url = params.get("url").and_then(Value::as_str).unwrap_or("");
+            if url.is_empty() {
+                return Err(ZocliError::Validation(
+                    "ui/open-link requires a non-empty 'url' parameter".to_string(),
+                ));
+            }
+            // Validate URL scheme — only http and https are safe.
+            let scheme = url
+                .find(':')
+                .map(|i| &url[..i])
+                .unwrap_or("");
+            if scheme != "https" && scheme != "http" {
+                return Err(ZocliError::Validation(format!(
+                    "ui/open-link rejects URL scheme '{scheme}:' — only http: and https: are allowed"
+                )));
+            }
+            session.last_open_link_url = Some(url.to_string());
+            Ok(json!({ "accepted": true, "url": url }))
         }
         "ui/resource-teardown" => {
-            session.ui_active_resource = None;
-            session.ui_initialized = false;
+            // Validate resource URI matches active resource if provided.
+            if let Some(teardown_uri) = params.get("resourceUri").and_then(Value::as_str) {
+                if let Some(active_uri) = session.ui_lifecycle.active_resource_uri() {
+                    if teardown_uri != active_uri {
+                        return Err(ZocliError::Validation(format!(
+                            "ui/resource-teardown resourceUri '{}' does not match active resource '{}'",
+                            teardown_uri, active_uri
+                        )));
+                    }
+                }
+            }
+            session.ui_lifecycle = UiLifecycleState::NotInitialized;
             Ok(json!({ "accepted": true }))
         }
 
@@ -2886,200 +3038,247 @@ fn roots_tool_response(roots: Vec<Value>, ui_enabled: bool) -> Result<Value> {
     Ok(Value::Object(response))
 }
 
+fn truncate_summary(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{truncated}\u{2026}")
+}
+
 fn render_tool_content(tool_name: &str, structured: &Value, ui_enabled: bool) -> Result<String> {
     if !ui_enabled {
         return serde_json::to_string_pretty(structured)
             .map_err(|err| ZocliError::Serialization(err.to_string()));
     }
 
-    Ok(match tool_name {
-        "zocli.app.snapshot" => {
-            let account_count = structured
-                .get("accountCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let current = structured
-                .get("currentAccount")
-                .and_then(Value::as_str)
-                .unwrap_or("none");
-            format!(
-                "zocli snapshot ready. {account_count} account(s). Current account: {current}. Open the app surface for details."
-            )
-        }
-        "zocli.update.check" => {
-            let current = structured
-                .get("currentVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let target = structured
-                .get("targetVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            match structured
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-            {
-                "update_available" => {
-                    format!("Update available: {current} -> {target}. Open the app or run `zocli update`.")
-                }
-                "already_up_to_date" => format!("zocli is up to date ({current})."),
-                status => format!("Update check status: {status}. Current: {current}. Target: {target}."),
-            }
-        }
-        "zocli.account.list" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} configured account(s). Open the account app for details.")
-        }
-        "zocli.account.current" => {
-            let account = structured
-                .get("account")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let email = structured
-                .get("email")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("Current account: {account} ({email}).")
-        }
-        "zocli.auth.status" => {
-            let account = structured
-                .get("account")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let state = structured
-                .get("auth")
-                .and_then(|auth| auth.get("credential_state"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let guidance = structured
-                .get("guidance")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            format!("Auth status for {account}: {state}. {guidance}")
-        }
-        "zocli.mail.folders" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} mail folder(s) loaded. Open the mail app for details.")
-        }
-        "zocli.mail.list" | "zocli.mail.search" => {
-            let items = structured.get("items").and_then(Value::as_array);
-            let count = items.map_or(0, |items| items.len());
-            let newest_subject = items
-                .and_then(|items| items.first())
-                .and_then(|item| item.get("subject"))
-                .and_then(Value::as_str)
-                .filter(|subject| !subject.trim().is_empty());
-            match newest_subject {
-                Some(subject) => {
-                    format!("{count} message(s) loaded. Latest subject: {subject}")
-                }
-                None => format!("{count} message(s) loaded. Open the mail app for details."),
-            }
-        }
-        "zocli.mail.read" => {
-            let item = structured.get("item");
-            let subject = item
-                .and_then(|item| item.get("subject"))
-                .and_then(Value::as_str)
-                .unwrap_or("Untitled");
-            let sender = item
-                .and_then(|item| item.get("sender"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown sender");
-            let attachments = item
-                .and_then(|item| item.get("attachments"))
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            if attachments > 0 {
-                format!(
-                    "Email \"{subject}\" from {sender}. {attachments} attachment(s). Open the mail app for the full message."
-                )
-            } else {
-                format!("Email \"{subject}\" from {sender}. Open the mail app for the full message.")
-            }
-        }
+    let raw = match tool_name {
+        "zocli.app.snapshot" => summary_app_snapshot(structured),
+        "zocli.update.check" => summary_update_check(structured),
+        "zocli.account.list" => summary_account_list(structured),
+        "zocli.account.current" => summary_account_current(structured),
+        "zocli.auth.status" => summary_auth_status(structured),
+        "zocli.mail.folders" => summary_mail_folders(structured),
+        "zocli.mail.list" | "zocli.mail.search" => summary_mail_list(structured),
+        "zocli.mail.read" => summary_mail_read(structured),
         "zocli.mail.send" | "zocli.mail.reply" | "zocli.mail.forward" => {
-            let id = structured
-                .get("message_id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("Mail action completed. Message id: {id}.")
+            summary_mail_action(structured)
         }
-        "zocli.mail.attachment_export" => {
-            let filename = structured
-                .get("filename")
-                .and_then(Value::as_str)
-                .unwrap_or("attachment");
-            format!("Attachment ready: {filename}. Open the mail app for details.")
-        }
-        "zocli.calendar.calendars" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} calendar(s) loaded. Open the calendar app for details.")
-        }
-        "zocli.calendar.events" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} calendar event(s) loaded. Open the calendar app for details.")
-        }
-        "zocli.calendar.create" => {
-            let summary = structured
-                .get("event")
-                .and_then(|event| event.get("summary"))
-                .and_then(Value::as_str)
-                .unwrap_or("event");
-            format!("Calendar event created: {summary}.")
-        }
-        "zocli.calendar.delete" => {
-            let uid = structured
-                .get("deleted_event")
-                .and_then(|event| event.get("uid"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("Calendar event deleted: {uid}.")
-        }
-        "zocli.drive.teams" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} WorkDrive team(s) loaded. Open the drive app for details.")
-        }
-        "zocli.drive.list" => {
-            let count = structured
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len());
-            format!("{count} WorkDrive item(s) loaded. Open the drive app for details.")
-        }
-        "zocli.drive.upload" => {
-            let name = structured
-                .get("file_name")
-                .and_then(Value::as_str)
-                .unwrap_or("file");
-            format!("Uploaded {name}.")
-        }
-        "zocli.drive.download" => {
-            let output = structured
-                .get("output_path")
-                .and_then(Value::as_str)
-                .unwrap_or("file");
-            format!("Downloaded file to {output}.")
-        }
+        "zocli.mail.attachment_export" => summary_mail_attachment_export(structured),
+        "zocli.calendar.calendars" => summary_calendar_calendars(structured),
+        "zocli.calendar.events" => summary_calendar_events(structured),
+        "zocli.calendar.create" => summary_calendar_create(structured),
+        "zocli.calendar.delete" => summary_calendar_delete(structured),
+        "zocli.drive.teams" => summary_drive_teams(structured),
+        "zocli.drive.list" => summary_drive_list(structured),
+        "zocli.drive.upload" => summary_drive_upload(structured),
+        "zocli.drive.download" => summary_drive_download(structured),
         "zocli.roots.list" => render_roots_summary(structured),
         _ => "Action completed. Open the app surface for details.".to_string(),
-    })
+    };
+    Ok(truncate_summary(&raw, SUMMARY_MAX_CHARS))
+}
+
+fn summary_app_snapshot(structured: &Value) -> String {
+    let account_count = structured
+        .get("accountCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let current = structured
+        .get("currentAccount")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    format!(
+        "zocli snapshot ready. {account_count} account(s). Current account: {current}. Open the app surface for details."
+    )
+}
+
+fn summary_update_check(structured: &Value) -> String {
+    let current = structured
+        .get("currentVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let target = structured
+        .get("targetVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match structured
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "update_available" => {
+            format!("Update available: {current} -> {target}. Open the app or run `zocli update`.")
+        }
+        "already_up_to_date" => format!("zocli is up to date ({current})."),
+        status => {
+            format!("Update check status: {status}. Current: {current}. Target: {target}.")
+        }
+    }
+}
+
+fn summary_account_list(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} configured account(s). Open the account app for details.")
+}
+
+fn summary_account_current(structured: &Value) -> String {
+    let account = structured
+        .get("account")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let email = structured
+        .get("email")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("Current account: {account} ({email}).")
+}
+
+fn summary_auth_status(structured: &Value) -> String {
+    let account = structured
+        .get("account")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let state = structured
+        .get("auth")
+        .and_then(|auth| auth.get("credential_state"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let guidance = structured
+        .get("guidance")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!("Auth status for {account}: {state}. {guidance}")
+}
+
+fn summary_mail_folders(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} mail folder(s) loaded. Open the mail app for details.")
+}
+
+fn summary_mail_list(structured: &Value) -> String {
+    let items = structured.get("items").and_then(Value::as_array);
+    let count = items.map_or(0, |items| items.len());
+    let newest_subject = items
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("subject"))
+        .and_then(Value::as_str)
+        .filter(|subject| !subject.trim().is_empty());
+    match newest_subject {
+        Some(subject) => format!("{count} message(s) loaded. Latest subject: {subject}"),
+        None => format!("{count} message(s) loaded. Open the mail app for details."),
+    }
+}
+
+fn summary_mail_read(structured: &Value) -> String {
+    let item = structured.get("item");
+    let subject = item
+        .and_then(|item| item.get("subject"))
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled");
+    let sender = item
+        .and_then(|item| item.get("sender"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown sender");
+    let attachments = item
+        .and_then(|item| item.get("attachments"))
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    if attachments > 0 {
+        format!(
+            "Email \"{subject}\" from {sender}. {attachments} attachment(s). Open the mail app for the full message."
+        )
+    } else {
+        format!("Email \"{subject}\" from {sender}. Open the mail app for the full message.")
+    }
+}
+
+fn summary_mail_action(structured: &Value) -> String {
+    let id = structured
+        .get("message_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("Mail action completed. Message id: {id}.")
+}
+
+fn summary_mail_attachment_export(structured: &Value) -> String {
+    let filename = structured
+        .get("filename")
+        .and_then(Value::as_str)
+        .unwrap_or("attachment");
+    format!("Attachment ready: {filename}. Open the mail app for details.")
+}
+
+fn summary_calendar_calendars(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} calendar(s) loaded. Open the calendar app for details.")
+}
+
+fn summary_calendar_events(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} calendar event(s) loaded. Open the calendar app for details.")
+}
+
+fn summary_calendar_create(structured: &Value) -> String {
+    let summary = structured
+        .get("event")
+        .and_then(|event| event.get("summary"))
+        .and_then(Value::as_str)
+        .unwrap_or("event");
+    format!("Calendar event created: {summary}.")
+}
+
+fn summary_calendar_delete(structured: &Value) -> String {
+    let uid = structured
+        .get("deleted_event")
+        .and_then(|event| event.get("uid"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("Calendar event deleted: {uid}.")
+}
+
+fn summary_drive_teams(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} WorkDrive team(s) loaded. Open the drive app for details.")
+}
+
+fn summary_drive_list(structured: &Value) -> String {
+    let count = structured
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, |items| items.len());
+    format!("{count} WorkDrive item(s) loaded. Open the drive app for details.")
+}
+
+fn summary_drive_upload(structured: &Value) -> String {
+    let name = structured
+        .get("file_name")
+        .and_then(Value::as_str)
+        .unwrap_or("file");
+    format!("Uploaded {name}.")
+}
+
+fn summary_drive_download(structured: &Value) -> String {
+    let output = structured
+        .get("output_path")
+        .and_then(Value::as_str)
+        .unwrap_or("file");
+    format!("Downloaded file to {output}.")
 }
 
 fn render_roots_content(structured: &Value, ui_enabled: bool) -> Result<String> {
@@ -3147,8 +3346,8 @@ fn app_resource_meta() -> Value {
         "ui": {
             "prefersBorder": true,
             "csp": {
-                "connectDomains": [],
-                "resourceDomains": [],
+                "connectDomains": ["'self'"],
+                "resourceDomains": ["'self'"],
                 "frameDomains": []
             }
         }

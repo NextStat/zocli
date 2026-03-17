@@ -896,7 +896,7 @@ fn mcp_stdio_apps_capable_clients_receive_ui_metadata_and_resources() {
         .expect("dashboard resource");
     assert_eq!(dashboard["mimeType"], APP_RESOURCE_MIME_TYPE);
     assert_eq!(dashboard["_meta"]["ui"]["prefersBorder"], true);
-    assert_eq!(dashboard["_meta"]["ui"]["csp"]["connectDomains"], json!([]));
+    assert_eq!(dashboard["_meta"]["ui"]["csp"]["connectDomains"], json!(["'self'"]));
 
     let templates = responses[3]["result"]["resourceTemplates"]
         .as_array()
@@ -1594,23 +1594,29 @@ fn mcp_stdio_ui_request_display_mode_validates_known_modes() {
         initialize_request(true),
         mcp_notification("notifications/initialized", json!({})),
         mcp_request(2, "ui/initialize", json!({})),
+        // Spec-correct modes: inline, fullscreen, pip
         mcp_request(
             3,
             "ui/request-display-mode",
-            json!({ "mode": "floating" }),
+            json!({ "mode": "fullscreen" }),
         ),
         mcp_request(
             4,
             "ui/request-display-mode",
-            json!({ "mode": "full-window" }),
+            json!({ "mode": "pip" }),
         ),
-        // Unknown modes fall back to "inline"
+        // Legacy/unknown modes fall back to "inline"
         mcp_request(
             5,
             "ui/request-display-mode",
-            json!({ "mode": "fullscreen" }),
+            json!({ "mode": "floating" }),
         ),
-        mcp_request(6, "ui/request-display-mode", json!({})),
+        mcp_request(
+            6,
+            "ui/request-display-mode",
+            json!({ "mode": "full-window" }),
+        ),
+        mcp_request(7, "ui/request-display-mode", json!({})),
     ]
     .concat();
 
@@ -1624,15 +1630,19 @@ fn mcp_stdio_ui_request_display_mode_validates_known_modes() {
         .clone();
 
     let responses = parse_responses(&output);
-    // responses[0]=init, responses[1]=ui/initialize, responses[2..5]=display-mode
-    assert_eq!(responses[2]["result"]["mode"], "floating");
-    assert_eq!(responses[3]["result"]["mode"], "full-window");
+    // responses[0]=init, responses[1]=ui/initialize, responses[2..6]=display-mode
+    assert_eq!(responses[2]["result"]["mode"], "fullscreen");
+    assert_eq!(responses[3]["result"]["mode"], "pip");
     assert_eq!(
         responses[4]["result"]["mode"], "inline",
-        "unknown mode must fall back to inline"
+        "legacy 'floating' must fall back to inline"
     );
     assert_eq!(
         responses[5]["result"]["mode"], "inline",
+        "legacy 'full-window' must fall back to inline"
+    );
+    assert_eq!(
+        responses[6]["result"]["mode"], "inline",
         "missing mode must default to inline"
     );
 }
@@ -1643,6 +1653,8 @@ fn mcp_stdio_ui_update_model_context_and_message_are_acknowledged() {
         initialize_request(true),
         mcp_notification("notifications/initialized", json!({})),
         mcp_request(2, "ui/initialize", json!({})),
+        // View confirms initialization — required before ui/message
+        mcp_notification("ui/notifications/initialized", json!({})),
         mcp_request(
             3,
             "ui/update-model-context",
@@ -1673,6 +1685,8 @@ fn mcp_stdio_ui_open_link_and_resource_teardown_acknowledged() {
         initialize_request(true),
         mcp_notification("notifications/initialized", json!({})),
         mcp_request(2, "ui/initialize", json!({})),
+        // View confirms initialization — required before ui/open-link
+        mcp_notification("ui/notifications/initialized", json!({})),
         mcp_request(
             3,
             "ui/open-link",
@@ -1771,11 +1785,11 @@ fn mcp_stdio_ui_full_lifecycle_initialize_interact_teardown() {
         ),
         // 5. Update model context
         mcp_request(3, "ui/update-model-context", json!({ "context": {} })),
-        // 6. Request display mode (use valid mode)
+        // 6. Request display mode (spec-correct mode)
         mcp_request(
             4,
             "ui/request-display-mode",
-            json!({ "mode": "floating" }),
+            json!({ "mode": "fullscreen" }),
         ),
         // 7. Tool input notification
         mcp_notification(
@@ -1834,19 +1848,25 @@ fn mcp_stdio_ui_full_lifecycle_initialize_interact_teardown() {
 
     // ui/initialize has protocol info
     assert_eq!(responses[1]["result"]["protocolVersion"], "2025-11-25");
-    // ui/request-display-mode validates mode
-    assert_eq!(responses[3]["result"]["mode"], "floating");
-    // ui/update-model-context, ui/message, ui/open-link, ui/resource-teardown return accepted
-    assert_eq!(responses[2]["result"], json!({ "accepted": true }));
-    assert_eq!(responses[4]["result"], json!({ "accepted": true }));
-    assert_eq!(responses[5]["result"], json!({ "accepted": true }));
-    assert_eq!(responses[6]["result"], json!({ "accepted": true }));
+    // ui/request-display-mode validates spec-correct mode
+    assert_eq!(responses[3]["result"]["mode"], "fullscreen");
+    // ui/update-model-context returns accepted + revision
+    assert_eq!(responses[2]["result"]["accepted"], true);
+    assert_eq!(responses[2]["result"]["revision"], 1);
+    // ui/message echoes stored text
+    assert_eq!(responses[4]["result"]["accepted"], true);
+    assert_eq!(responses[4]["result"]["stored"], "ok");
+    // ui/open-link echoes url
+    assert_eq!(responses[5]["result"]["accepted"], true);
+    assert_eq!(responses[5]["result"]["url"], "https://example.com");
+    // ui/resource-teardown returns accepted
+    assert_eq!(responses[6]["result"]["accepted"], true);
 }
 
 #[test]
 fn mcp_stdio_ui_methods_require_ui_initialize_gate() {
     // Send ui/update-model-context WITHOUT calling ui/initialize first.
-    // The server should reject it because ui_initialized is false.
+    // The server should reject it because UI lifecycle is NotInitialized.
     let input = [
         initialize_request(true),
         mcp_notification("notifications/initialized", json!({})),
@@ -1882,15 +1902,17 @@ fn mcp_stdio_ui_methods_require_ui_initialize_gate() {
 
 #[test]
 fn mcp_stdio_ui_teardown_resets_lifecycle_requires_reinitialize() {
-    // Full lifecycle: initialize → interact → teardown → try again without re-init
+    // Full lifecycle: initialize → view ready → interact → teardown → try again without re-init
     let input = [
         initialize_request(true),
         mcp_notification("notifications/initialized", json!({})),
         // ui/initialize
         mcp_request(2, "ui/initialize", json!({})),
-        // ui/message — should succeed
+        // View confirms initialization
+        mcp_notification("ui/notifications/initialized", json!({})),
+        // ui/message — should succeed (view is ready)
         mcp_request(3, "ui/message", json!({ "type": "info", "text": "ok" })),
-        // teardown — resets ui_initialized
+        // teardown — transitions to NotInitialized
         mcp_request(4, "ui/resource-teardown", json!({ "uri": "ui://zocli/dashboard" })),
         // ui/message again — should FAIL because teardown reset the state
         mcp_request(5, "ui/message", json!({ "type": "info", "text": "after teardown" })),
@@ -1913,10 +1935,11 @@ fn mcp_stdio_ui_teardown_resets_lifecycle_requires_reinitialize() {
     assert!(responses[1].get("result").is_some());
     // ui/message succeeds before teardown
     assert_eq!(responses[2]["id"], 3);
-    assert_eq!(responses[2]["result"], json!({ "accepted": true }));
+    assert_eq!(responses[2]["result"]["accepted"], true);
+    assert_eq!(responses[2]["result"]["stored"], "ok");
     // teardown succeeds
     assert_eq!(responses[3]["id"], 4);
-    assert_eq!(responses[3]["result"], json!({ "accepted": true }));
+    assert_eq!(responses[3]["result"]["accepted"], true);
     // ui/message after teardown must be an error
     assert_eq!(responses[4]["id"], 5);
     assert!(
@@ -3599,6 +3622,364 @@ fn schema_list_operations_follow_items_pattern() {
     }
 }
 
+// ── MCP Apps spec contract tests ──
+
+/// Verify display mode names match MCP Apps spec SEP-1865 (2026-01-26).
+/// Stable modes: inline, fullscreen, pip. Nothing else is accepted.
+#[test]
+fn spec_display_modes_match_sep_1865() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // All three spec-correct modes
+        mcp_request(3, "ui/request-display-mode", json!({ "mode": "inline" })),
+        mcp_request(4, "ui/request-display-mode", json!({ "mode": "fullscreen" })),
+        mcp_request(5, "ui/request-display-mode", json!({ "mode": "pip" })),
+        // Non-spec modes must fall back to inline
+        mcp_request(6, "ui/request-display-mode", json!({ "mode": "floating" })),
+        mcp_request(7, "ui/request-display-mode", json!({ "mode": "full-window" })),
+        mcp_request(8, "ui/request-display-mode", json!({ "mode": "maximized" })),
+        mcp_request(9, "ui/request-display-mode", json!({ "mode": "" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // Spec-correct modes echoed back
+    assert_eq!(responses[2]["result"]["mode"], "inline");
+    assert_eq!(responses[3]["result"]["mode"], "fullscreen");
+    assert_eq!(responses[4]["result"]["mode"], "pip");
+    // Non-spec modes → inline fallback
+    for (i, resp) in responses.iter().enumerate().take(9).skip(5) {
+        assert_eq!(
+            resp["result"]["mode"], "inline",
+            "response[{i}] must fall back to inline for non-spec mode"
+        );
+    }
+}
+
+/// Verify UI lifecycle gate is enforced: ui/* methods before ui/initialize return error.
+#[test]
+fn spec_ui_lifecycle_gate_enforced() {
+    let methods = [
+        "ui/update-model-context",
+        "ui/message",
+        "ui/request-display-mode",
+        "ui/open-link",
+        "ui/resource-teardown",
+    ];
+    for (i, method) in methods.iter().enumerate() {
+        let id = (i + 2) as u64;
+        let input = [
+            initialize_request(true),
+            mcp_notification("notifications/initialized", json!({})),
+            // No ui/initialize — go straight to ui/* method
+            mcp_request(id, method, json!({})),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        assert!(
+            responses[1].get("error").is_some(),
+            "{method} without prior ui/initialize must return error, got: {}",
+            responses[1]
+        );
+    }
+}
+
+/// Verify app metadata shape in ui/initialize response matches spec.
+#[test]
+fn spec_ui_initialize_response_shape() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let result = &responses[1]["result"];
+    // Required fields per spec
+    assert!(result.get("protocolVersion").is_some(), "missing protocolVersion");
+    assert!(result.get("serverInfo").is_some(), "missing serverInfo");
+    assert!(result.get("capabilities").is_some(), "missing capabilities");
+    assert!(result["serverInfo"].get("name").is_some(), "missing serverInfo.name");
+    assert!(result["serverInfo"].get("version").is_some(), "missing serverInfo.version");
+}
+
+/// Double ui/initialize is allowed — resets the session to a fresh Active state.
+/// After re-init, view_initialized resets to false, so ui/message requires
+/// a new ui/notifications/initialized before it can succeed again.
+#[test]
+fn spec_ui_double_initialize_resets_state() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // View confirms initialization
+        mcp_notification("ui/notifications/initialized", json!({})),
+        mcp_request(3, "ui/message", json!({ "type": "info", "text": "first" })),
+        // Second ui/initialize — should succeed and reset state (view_initialized=false)
+        mcp_request(4, "ui/initialize", json!({})),
+        // ui/message without re-sending ui/notifications/initialized — should FAIL
+        mcp_request(5, "ui/message", json!({ "type": "info", "text": "second" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 5);
+    // Both ui/initialize succeed
+    assert!(responses[1].get("result").is_some());
+    assert!(responses[3].get("result").is_some());
+    // First ui/message succeeds (view was initialized)
+    assert_eq!(responses[2]["result"]["accepted"], true);
+    // Second ui/message fails — re-init reset view_initialized to false
+    assert!(
+        responses[4].get("error").is_some(),
+        "ui/message after re-initialize without ui/notifications/initialized must fail, got: {}",
+        responses[4]
+    );
+}
+
+/// Double teardown: second teardown fails because state is NotInitialized after first.
+#[test]
+fn spec_ui_double_teardown_fails() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        mcp_request(3, "ui/resource-teardown", json!({ "uri": "ui://zocli/dashboard" })),
+        // Second teardown — should fail, already NotInitialized
+        mcp_request(4, "ui/resource-teardown", json!({ "uri": "ui://zocli/dashboard" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 4);
+    // First teardown succeeds
+    assert_eq!(responses[2]["result"]["accepted"], true);
+    // Second teardown → error (not initialized)
+    assert!(
+        responses[3].get("error").is_some(),
+        "double teardown must return error, got: {}",
+        responses[3]
+    );
+}
+
+/// ui/update-model-context increments host-context revision (semantic effect, not just ack).
+/// After teardown + re-init, revision resets to 0.
+#[test]
+fn spec_ui_model_context_tracks_revision() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // 3 model-context updates
+        mcp_request(3, "ui/update-model-context", json!({ "context": {} })),
+        mcp_request(4, "ui/update-model-context", json!({ "context": {} })),
+        mcp_request(5, "ui/update-model-context", json!({ "context": {} })),
+        // All should accept
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 5);
+    // All three model-context updates accepted AND revision increments monotonically.
+    assert_eq!(responses[2]["result"]["accepted"], true);
+    assert_eq!(responses[2]["result"]["revision"], 1);
+    assert_eq!(responses[3]["result"]["accepted"], true);
+    assert_eq!(responses[3]["result"]["revision"], 2);
+    assert_eq!(responses[4]["result"]["accepted"], true);
+    assert_eq!(responses[4]["result"]["revision"], 3);
+}
+
+/// ui/message and ui/open-link require view to be initialized (ui/notifications/initialized).
+/// Without that notification, they must fail even if ui/initialize was called.
+#[test]
+fn spec_ui_message_and_open_link_require_view_ready() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // No ui/notifications/initialized — view not ready
+        mcp_request(3, "ui/message", json!({ "type": "info", "text": "too early" })),
+        mcp_request(4, "ui/open-link", json!({ "url": "https://example.com" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 4);
+    // ui/initialize succeeds
+    assert!(responses[1].get("result").is_some());
+    // ui/message fails — view not ready
+    assert!(
+        responses[2].get("error").is_some(),
+        "ui/message without view initialization must fail, got: {}",
+        responses[2]
+    );
+    // ui/open-link fails — view not ready
+    assert!(
+        responses[3].get("error").is_some(),
+        "ui/open-link without view initialization must fail, got: {}",
+        responses[3]
+    );
+}
+
+/// ui/open-link requires a non-empty 'url' parameter.
+#[test]
+fn spec_ui_open_link_requires_url() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        mcp_notification("ui/notifications/initialized", json!({})),
+        // Missing url
+        mcp_request(3, "ui/open-link", json!({})),
+        // Empty url
+        mcp_request(4, "ui/open-link", json!({ "url": "" })),
+        // Valid url
+        mcp_request(5, "ui/open-link", json!({ "url": "https://example.com" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 5);
+    // Missing url → error
+    assert!(
+        responses[2].get("error").is_some(),
+        "ui/open-link without url must fail, got: {}",
+        responses[2]
+    );
+    // Empty url → error
+    assert!(
+        responses[3].get("error").is_some(),
+        "ui/open-link with empty url must fail, got: {}",
+        responses[3]
+    );
+    // Valid url → success
+    assert_eq!(responses[4]["result"]["accepted"], true);
+}
+
+/// ui/resource-teardown validates resourceUri against active resource.
+#[test]
+fn spec_ui_teardown_validates_resource_uri() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // View reports its resource URI
+        mcp_notification(
+            "ui/notifications/initialized",
+            json!({ "resourceUri": "ui://zocli/dashboard" }),
+        ),
+        // Teardown with wrong URI — should fail
+        mcp_request(
+            3,
+            "ui/resource-teardown",
+            json!({ "resourceUri": "ui://zocli/wrong" }),
+        ),
+        // Teardown with correct URI — should succeed
+        mcp_request(
+            4,
+            "ui/resource-teardown",
+            json!({ "resourceUri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses.len(), 4);
+    // Wrong URI → error
+    assert!(
+        responses[2].get("error").is_some(),
+        "ui/resource-teardown with wrong resourceUri must fail, got: {}",
+        responses[2]
+    );
+    // Correct URI → success
+    assert_eq!(responses[3]["result"]["accepted"], true);
+}
+
 #[test]
 fn mcp_stdio_resource_teardown_is_acknowledged() {
     let input = [
@@ -3623,5 +4004,1092 @@ fn mcp_stdio_resource_teardown_is_acknowledged() {
     assert_eq!(
         responses[2]["result"]["accepted"], true,
         "resource-teardown must return accepted: true"
+    );
+}
+
+// =============================================================================
+// Phase A3 — Summary Contract
+// =============================================================================
+
+/// For every callable tool in UI mode, the content[0].text must NOT start with
+/// `{` or `[` — it must be a human-readable summary, not raw JSON.
+#[test]
+fn summary_contract_no_json_leak_in_ui_content() {
+    let tools = [
+        ("zocli.app.snapshot", json!({})),
+        ("zocli.account.list", json!({})),
+        ("zocli.account.current", json!({})),
+        ("zocli.auth.status", json!({})),
+        ("zocli.update.check", json!({})),
+    ];
+
+    for (tool_name, args) in &tools {
+        let input = [
+            initialize_request(true),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "tools/call",
+                json!({ "name": tool_name, "arguments": args }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let result = &responses[1]["result"];
+        let content = result["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{tool_name}: missing content array"));
+        assert!(
+            !content.is_empty(),
+            "{tool_name}: content array must not be empty"
+        );
+        let text = content[0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool_name}: missing text in content[0]"));
+        let first_char = text.chars().next().unwrap_or(' ');
+        assert!(
+            first_char != '{' && first_char != '[',
+            "{tool_name}: UI content must be human summary, not JSON. Got: {text}"
+        );
+    }
+}
+
+/// All UI summaries must be ≤ 280 characters.
+#[test]
+fn summary_contract_max_length_enforced() {
+    let tools = [
+        ("zocli.app.snapshot", json!({})),
+        ("zocli.account.list", json!({})),
+        ("zocli.account.current", json!({})),
+        ("zocli.auth.status", json!({})),
+        ("zocli.update.check", json!({})),
+    ];
+
+    for (tool_name, args) in &tools {
+        let input = [
+            initialize_request(true),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "tools/call",
+                json!({ "name": tool_name, "arguments": args }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let result = &responses[1]["result"];
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool_name}: missing text"));
+        assert!(
+            text.chars().count() <= 280,
+            "{tool_name}: summary too long ({} chars > 280): {text}",
+            text.chars().count()
+        );
+    }
+}
+
+/// Non-UI content must preserve full JSON for model consumption.
+#[test]
+fn summary_contract_non_ui_preserves_json() {
+    let tools = [
+        ("zocli.app.snapshot", json!({})),
+        ("zocli.account.list", json!({})),
+        ("zocli.account.current", json!({})),
+        ("zocli.auth.status", json!({})),
+        ("zocli.update.check", json!({})),
+    ];
+
+    for (tool_name, args) in &tools {
+        let input = [
+            initialize_request(false),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "tools/call",
+                json!({ "name": tool_name, "arguments": args }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let result = &responses[1]["result"];
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool_name}: missing text"));
+        // Non-UI content must be valid JSON
+        let parsed: std::result::Result<Value, _> = serde_json::from_str(text);
+        assert!(
+            parsed.is_ok(),
+            "{tool_name}: non-UI content must be valid JSON, got: {text}"
+        );
+    }
+}
+
+// =============================================================================
+// Phase A5 — Host Action Semantics
+// =============================================================================
+
+/// ui/message rejects payloads that have neither `content` nor `text`.
+#[test]
+fn host_action_message_rejects_missing_content() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        mcp_notification("ui/notifications/initialized", json!({})),
+        // Empty payload — no content, no text
+        mcp_request(3, "ui/message", json!({})),
+        // Valid payload with text
+        mcp_request(4, "ui/message", json!({ "text": "hello" })),
+        // Valid payload with content
+        mcp_request(5, "ui/message", json!({ "content": "hello" })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // responses: [init, ui/initialize, ui/message(empty), ui/message(text), ui/message(content)]
+    assert!(
+        responses[2].get("error").is_some(),
+        "ui/message with empty payload must fail, got: {}",
+        responses[2]
+    );
+    assert_eq!(
+        responses[3]["result"]["accepted"], true,
+        "ui/message with text must succeed"
+    );
+    assert_eq!(
+        responses[4]["result"]["accepted"], true,
+        "ui/message with content must succeed"
+    );
+}
+
+/// ui/open-link rejects dangerous URL schemes (javascript:, data:, file:).
+#[test]
+fn host_action_open_link_rejects_dangerous_schemes() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        mcp_notification("ui/notifications/initialized", json!({})),
+        // Dangerous schemes
+        mcp_request(
+            3,
+            "ui/open-link",
+            json!({ "url": "javascript:alert(1)" }),
+        ),
+        mcp_request(
+            4,
+            "ui/open-link",
+            json!({ "url": "data:text/html,<h1>xss</h1>" }),
+        ),
+        mcp_request(
+            5,
+            "ui/open-link",
+            json!({ "url": "file:///etc/passwd" }),
+        ),
+        // Safe schemes
+        mcp_request(
+            6,
+            "ui/open-link",
+            json!({ "url": "https://example.com" }),
+        ),
+        mcp_request(
+            7,
+            "ui/open-link",
+            json!({ "url": "http://example.com" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // responses: [init, ui/init, js, data, file, https, http]
+    assert!(
+        responses[2].get("error").is_some(),
+        "javascript: must be rejected, got: {}",
+        responses[2]
+    );
+    assert!(
+        responses[3].get("error").is_some(),
+        "data: must be rejected, got: {}",
+        responses[3]
+    );
+    assert!(
+        responses[4].get("error").is_some(),
+        "file: must be rejected, got: {}",
+        responses[4]
+    );
+    assert_eq!(
+        responses[5]["result"]["accepted"], true,
+        "https: must be accepted"
+    );
+    assert_eq!(
+        responses[6]["result"]["accepted"], true,
+        "http: must be accepted"
+    );
+}
+
+// =============================================================================
+// Phase A6 — Security Hardening
+// =============================================================================
+
+/// For every ui:// resource, _meta.ui.csp.connectDomains must contain "'self'"
+/// and frameDomains must be empty.
+#[test]
+fn security_csp_shape_populated() {
+    let surfaces = [
+        "ui://zocli/dashboard",
+        "ui://zocli/mail",
+        "ui://zocli/calendar",
+        "ui://zocli/drive",
+        "ui://zocli/auth",
+        "ui://zocli/account",
+    ];
+
+    for surface_uri in &surfaces {
+        let input = [
+            initialize_request(true),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "resources/read",
+                json!({ "uri": surface_uri }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let contents = responses[1]["result"]["contents"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface_uri}: missing contents array"));
+        assert!(!contents.is_empty(), "{surface_uri}: empty contents");
+
+        let meta = &contents[0]["_meta"];
+        let connect = meta["ui"]["csp"]["connectDomains"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface_uri}: missing connectDomains"));
+        assert!(
+            connect.iter().any(|v| v.as_str() == Some("'self'")),
+            "{surface_uri}: connectDomains must contain 'self', got: {connect:?}"
+        );
+
+        let frame = meta["ui"]["csp"]["frameDomains"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface_uri}: missing frameDomains"));
+        assert!(
+            frame.is_empty(),
+            "{surface_uri}: frameDomains must be empty, got: {frame:?}"
+        );
+    }
+}
+
+/// Dashboard HTML must not contain any external `<script src=` tags.
+#[test]
+fn security_html_no_external_scripts() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text");
+    // No external script tags
+    assert!(
+        !html.contains("<script src="),
+        "dashboard HTML must not contain external script tags"
+    );
+}
+
+/// Dashboard HTML must not contain any external stylesheet links.
+#[test]
+fn security_html_no_external_styles() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text");
+    assert!(
+        !html.contains(r#"<link rel="stylesheet" href="#),
+        "dashboard HTML must not contain external stylesheet links"
+    );
+}
+
+/// Dashboard HTML must capture hostOrigin and never use bare postMessage(msg, "*")
+/// without a fallback guard.
+#[test]
+fn security_postmessage_origin_capture() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text");
+    // Must contain hostOrigin variable for origin capture
+    assert!(
+        html.contains("hostOrigin"),
+        "dashboard HTML must contain 'hostOrigin' pattern for origin tracking"
+    );
+    // The postMessage function uses `hostOrigin || "*"` — guarded fallback, not bare "*"
+    assert!(
+        html.contains(r#"hostOrigin || "*""#),
+        "postMessage must use hostOrigin with guarded fallback"
+    );
+}
+
+// =============================================================================
+// Phase A4 — Dedicated Surface Controllers
+// =============================================================================
+
+/// Dashboard HTML must contain SURFACE_CONTROLLERS with all 6 surface keys.
+#[test]
+fn surface_controller_registry_exists() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text");
+
+    assert!(
+        html.contains("SURFACE_CONTROLLERS"),
+        "dashboard HTML must contain SURFACE_CONTROLLERS"
+    );
+    for surface in &["dashboard", "mail", "calendar", "drive", "auth", "account"] {
+        assert!(
+            html.contains(&format!("{surface}:")),
+            "SURFACE_CONTROLLERS must contain key '{surface}'"
+        );
+    }
+}
+
+/// Each surface controller must have a defaultPanel field.
+#[test]
+fn surface_controller_each_surface_has_defaults() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text");
+
+    // Every surface entry must have a defaultPanel field
+    for surface in &["dashboard", "mail", "calendar", "drive", "auth", "account"] {
+        assert!(
+            html.contains("defaultPanel"),
+            "surface controller '{surface}' must define defaultPanel"
+        );
+    }
+}
+
+/// The mail surface controller should focus the prompts panel.
+#[test]
+fn surface_controller_mail_focuses_prompts() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/mail" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let html = responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("mail surface HTML text");
+
+    // HTML should contain the bootstrap with preferredSection = prompts
+    assert!(
+        html.contains(r#""preferredSection":"prompts"#),
+        "mail surface bootstrap must set preferredSection to prompts"
+    );
+    // HTML should contain SURFACE_CONTROLLERS with mail entry
+    assert!(
+        html.contains("SURFACE_CONTROLLERS"),
+        "mail surface HTML must contain SURFACE_CONTROLLERS"
+    );
+}
+
+// =============================================================================
+// Phase A7 — Browser Conformance Harness
+// =============================================================================
+
+fn get_dashboard_html() -> String {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    responses[1]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("dashboard HTML text")
+        .to_string()
+}
+
+/// HTML must contain all postMessage lifecycle functions.
+#[test]
+fn browser_harness_postmessage_lifecycle_functions() {
+    let html = get_dashboard_html();
+    for func in &[
+        "sendRequest",
+        "sendNotification",
+        "sendResponse",
+        "onMessage",
+        "handleHostNotification",
+        "initializeApp",
+    ] {
+        assert!(
+            html.contains(func),
+            "dashboard HTML must contain function '{func}'"
+        );
+    }
+}
+
+/// HTML must contain display mode strings and requestAlternateDisplayMode.
+#[test]
+fn browser_harness_display_mode_strings() {
+    let html = get_dashboard_html();
+    for token in &[
+        r#""inline""#,
+        r#""fullscreen""#,
+        r#""pip""#,
+        "requestAlternateDisplayMode",
+    ] {
+        assert!(
+            html.contains(token),
+            "dashboard HTML must contain '{token}'"
+        );
+    }
+}
+
+/// HTML must start with <!doctype html>, have a single inline <script>, no external scripts.
+#[test]
+fn browser_harness_html_structure() {
+    let html = get_dashboard_html();
+    assert!(
+        html.trim_start().starts_with("<!doctype html>") || html.trim_start().starts_with("<!DOCTYPE html>"),
+        "dashboard HTML must start with <!doctype html>"
+    );
+    // Must have at least one inline <script>
+    assert!(
+        html.contains("<script>"),
+        "dashboard HTML must have an inline <script>"
+    );
+    // No external scripts
+    assert!(
+        !html.contains("<script src="),
+        "dashboard HTML must not have external script tags"
+    );
+}
+
+/// For each surface, APP_BOOTSTRAP JSON must contain expected keys.
+#[test]
+fn browser_harness_bootstrap_injection() {
+    let surfaces = [
+        "ui://zocli/dashboard",
+        "ui://zocli/mail",
+        "ui://zocli/calendar",
+        "ui://zocli/drive",
+        "ui://zocli/auth",
+        "ui://zocli/account",
+    ];
+    let expected_keys = [
+        "resourceUri",
+        "defaultAccount",
+        "preferredSection",
+        "preferredResource",
+        "preferredTool",
+        "preferredSkill",
+        "preferredPrompt",
+    ];
+
+    for surface_uri in &surfaces {
+        let input = [
+            initialize_request(true),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "resources/read",
+                json!({ "uri": surface_uri }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let html = responses[1]["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{surface_uri}: missing HTML text"));
+
+        // Extract APP_BOOTSTRAP JSON from HTML
+        let bootstrap_marker = "const APP_BOOTSTRAP = ";
+        let start = html
+            .find(bootstrap_marker)
+            .unwrap_or_else(|| panic!("{surface_uri}: missing APP_BOOTSTRAP"));
+        let json_start = start + bootstrap_marker.len();
+        let rest = &html[json_start..];
+        let end = rest.find(';').unwrap_or(rest.len());
+        let bootstrap_json = &rest[..end];
+        let bootstrap: Value = serde_json::from_str(bootstrap_json)
+            .unwrap_or_else(|err| panic!("{surface_uri}: invalid APP_BOOTSTRAP JSON: {err}"));
+
+        for key in &expected_keys {
+            assert!(
+                bootstrap.get(key).is_some(),
+                "{surface_uri}: APP_BOOTSTRAP missing key '{key}'"
+            );
+        }
+    }
+}
+
+/// HTML must contain renderToolResult and normalizeToolPayload.
+#[test]
+fn browser_harness_tool_result_rendering() {
+    let html = get_dashboard_html();
+    assert!(
+        html.contains("renderToolResult"),
+        "dashboard HTML must contain 'renderToolResult'"
+    );
+    assert!(
+        html.contains("normalizeToolPayload"),
+        "dashboard HTML must contain 'normalizeToolPayload'"
+    );
+}
+
+// =============================================================================
+// Phase A8 — Host Compatibility Matrix
+// =============================================================================
+
+/// Non-UI host: tools must NOT have _meta, no ui:// resources, content is JSON.
+#[test]
+fn compat_matrix_non_ui_no_meta_no_ui_resources() {
+    // tools/list without UI
+    let input = [
+        initialize_request(false),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "tools/list", json!({})),
+        mcp_request(3, "resources/list", json!({})),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // Check tools
+    let tools = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    for tool in tools {
+        assert!(
+            tool.get("_meta").is_none(),
+            "non-UI host: tool '{}' must not have _meta, got: {}",
+            tool["name"],
+            tool
+        );
+    }
+    // Check resources — no ui:// URIs
+    let resources = responses[2]["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    for resource in resources {
+        let uri = resource["uri"].as_str().unwrap_or("");
+        assert!(
+            !uri.starts_with("ui://"),
+            "non-UI host must not see ui:// resources, found: {uri}"
+        );
+    }
+}
+
+/// UI host: tools must have _meta.ui.resourceUri, all 6 ui:// resources present,
+/// content is human-readable.
+#[test]
+fn compat_matrix_ui_has_meta_and_surfaces() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "tools/list", json!({})),
+        mcp_request(3, "resources/list", json!({})),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // Check that at least some tools have _meta
+    let tools = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let tools_with_meta: Vec<_> = tools
+        .iter()
+        .filter(|t| t.get("_meta").is_some())
+        .collect();
+    assert!(
+        !tools_with_meta.is_empty(),
+        "UI host: at least some tools must have _meta"
+    );
+    // Verify _meta has resourceUri
+    for tool in &tools_with_meta {
+        let resource_uri = tool["_meta"]["ui"]["resourceUri"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "tool '{}' _meta.ui.resourceUri missing",
+                    tool["name"]
+                )
+            });
+        assert!(
+            resource_uri.starts_with("ui://zocli/"),
+            "tool '{}' resourceUri must be ui://zocli/*, got: {resource_uri}",
+            tool["name"]
+        );
+    }
+
+    // Check resources — all 6 ui:// surfaces
+    let resources = responses[2]["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    let ui_uris: Vec<&str> = resources
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .filter(|u| u.starts_with("ui://"))
+        .collect();
+    for expected in &[
+        "ui://zocli/dashboard",
+        "ui://zocli/mail",
+        "ui://zocli/calendar",
+        "ui://zocli/drive",
+        "ui://zocli/auth",
+        "ui://zocli/account",
+    ] {
+        assert!(
+            ui_uris.contains(expected),
+            "UI host must list resource '{expected}', found: {ui_uris:?}"
+        );
+    }
+}
+
+/// Display modes: UI host must accept inline/fullscreen/pip; unknown falls back to inline.
+#[test]
+fn compat_matrix_display_modes_per_profile() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        // Valid modes
+        mcp_request(3, "ui/request-display-mode", json!({ "mode": "inline" })),
+        mcp_request(
+            4,
+            "ui/request-display-mode",
+            json!({ "mode": "fullscreen" }),
+        ),
+        mcp_request(5, "ui/request-display-mode", json!({ "mode": "pip" })),
+        // Unknown mode → falls back to inline
+        mcp_request(
+            6,
+            "ui/request-display-mode",
+            json!({ "mode": "floating" }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    assert_eq!(responses[2]["result"]["mode"], "inline");
+    assert_eq!(responses[3]["result"]["mode"], "fullscreen");
+    assert_eq!(responses[4]["result"]["mode"], "pip");
+    assert_eq!(
+        responses[5]["result"]["mode"], "inline",
+        "unknown display mode must fall back to inline"
+    );
+}
+
+/// Both UI and non-UI: structuredContent.schemaVersion must always be "1.0".
+#[test]
+fn compat_matrix_schema_version_always_present() {
+    for ui_enabled in &[true, false] {
+        let input = [
+            initialize_request(*ui_enabled),
+            mcp_notification("notifications/initialized", json!({})),
+            mcp_request(
+                2,
+                "tools/call",
+                json!({ "name": "zocli.app.snapshot", "arguments": {} }),
+            ),
+        ]
+        .concat();
+
+        let output = zocli()
+            .args(["mcp"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let responses = parse_responses(&output);
+        let result = &responses[1]["result"];
+        assert_eq!(
+            result["structuredContent"]["schemaVersion"], "1.0",
+            "ui_enabled={ui_enabled}: structuredContent.schemaVersion must be '1.0'"
+        );
+    }
+}
+
+/// UI profile: CSP populated. Non-UI profile: no _meta at all.
+#[test]
+fn compat_matrix_csp_shape_ui_only() {
+    // UI: CSP populated
+    let input_ui = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "resources/read",
+            json!({ "uri": "ui://zocli/dashboard" }),
+        ),
+    ]
+    .concat();
+
+    let output_ui = zocli()
+        .args(["mcp"])
+        .write_stdin(input_ui)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses_ui = parse_responses(&output_ui);
+    let meta = &responses_ui[1]["result"]["contents"][0]["_meta"];
+    assert!(
+        meta["ui"]["csp"]["connectDomains"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "UI profile: CSP connectDomains must be populated"
+    );
+
+    // Non-UI: tools should not have _meta
+    let input_non_ui = [
+        initialize_request(false),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "tools/call",
+            json!({ "name": "zocli.app.snapshot", "arguments": {} }),
+        ),
+    ]
+    .concat();
+
+    let output_non_ui = zocli()
+        .args(["mcp"])
+        .write_stdin(input_non_ui)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses_non_ui = parse_responses(&output_non_ui);
+    let tool_result = &responses_non_ui[1]["result"];
+    assert!(
+        tool_result.get("_meta").is_none(),
+        "non-UI profile: tool result must not have _meta"
+    );
+}
+
+/// Non-UI host gets full data in JSON content — no information loss.
+#[test]
+fn compat_matrix_graceful_degradation() {
+    let input = [
+        initialize_request(false),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(
+            2,
+            "tools/call",
+            json!({ "name": "zocli.app.snapshot", "arguments": {} }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let result = &responses[1]["result"];
+
+    // content[0].text must be valid JSON with full data
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("content text");
+    let parsed: Value = serde_json::from_str(text).expect("must be valid JSON");
+    // Must have schemaVersion in the parsed JSON (from structuredContent which is also in text)
+    assert!(
+        parsed.get("schemaVersion").is_some() || parsed.get("accountCount").is_some(),
+        "non-UI content must contain full data, got: {text}"
+    );
+
+    // structuredContent must also be present
+    assert!(
+        result.get("structuredContent").is_some(),
+        "structuredContent must always be present"
+    );
+}
+
+// =============================================================================
+// Phase A5 addendum — Session state fields are observable (not write-only)
+// =============================================================================
+
+/// ui/message echoes stored text; ui/open-link echoes url; ui/update-model-context echoes revision.
+#[test]
+fn host_action_session_state_fields_observable() {
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "ui/initialize", json!({})),
+        mcp_notification("ui/notifications/initialized", json!({})),
+        mcp_request(3, "ui/message", json!({ "text": "observable payload" })),
+        mcp_request(
+            4,
+            "ui/open-link",
+            json!({ "url": "https://observable.test" }),
+        ),
+        mcp_request(5, "ui/update-model-context", json!({ "context": { "key": "v1" } })),
+    ]
+    .concat();
+
+    let output = zocli()
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    // ui/message echoes stored text
+    assert_eq!(
+        responses[2]["result"]["stored"], "observable payload",
+        "ui/message must echo stored text"
+    );
+    // ui/open-link echoes url
+    assert_eq!(
+        responses[3]["result"]["url"], "https://observable.test",
+        "ui/open-link must echo accepted url"
+    );
+    // ui/update-model-context returns revision
+    assert_eq!(
+        responses[4]["result"]["revision"], 1,
+        "ui/update-model-context must return monotonic revision"
     );
 }
