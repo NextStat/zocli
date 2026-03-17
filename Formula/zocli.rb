@@ -1,27 +1,27 @@
 class Zocli < Formula
   desc "Zoho Mail, Calendar, and WorkDrive CLI for humans and AI agents"
   homepage "https://github.com/NextStat/zocli"
-  version "0.2.2"
+  version "0.2.3"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/NextStat/zocli/releases/download/v0.2.2/zocli-aarch64-apple-darwin.tar.gz"
-      sha256 "10d572d87fb5877a48e5bd6926865394609556dceac0c495969c9169b0662497"
+      url "https://github.com/NextStat/zocli/releases/download/v0.2.3/zocli-aarch64-apple-darwin.tar.gz"
+      sha256 "ff13b7e154efc9eb6e04ef4d3a635ab244f983f7027f5162599add9ad4954039"
     else
-      url "https://github.com/NextStat/zocli/releases/download/v0.2.2/zocli-x86_64-apple-darwin.tar.gz"
-      sha256 "a26c0594c6712a77c90c366c04f93ae71ea0092736be4d62e10173f0f32f6a9e"
+      url "https://github.com/NextStat/zocli/releases/download/v0.2.3/zocli-x86_64-apple-darwin.tar.gz"
+      sha256 "549cb5f9b397a62eebc53aaa363c5ef34a319490134ed2051988b75342a75605"
     end
 
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/NextStat/zocli/releases/download/v0.2.2/zocli-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "01a963363e582695e69e31a27d55b5a345b95558d3c23ddd9083b70cf1f91900"
+      url "https://github.com/NextStat/zocli/releases/download/v0.2.3/zocli-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "6df5f5e484993e36c47ad0b859026ded3923489104cae968fb82c63b15afdf9e"
     elsif Hardware::CPU.intel?
-      url "https://github.com/NextStat/zocli/releases/download/v0.2.2/zocli-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "4fad094a67bdceb344840ba3d7aafdd736dcaceec6e4ad4d9e2db5f187cb916a"
+      url "https://github.com/NextStat/zocli/releases/download/v0.2.3/zocli-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "b4cc49a966d0ed54f48269419400487dca6af89466812bcdaf6af11114952b91"
     else
       odie "zocli Homebrew packages are not published for this Linux CPU."
     end
