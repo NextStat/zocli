@@ -4022,6 +4022,8 @@ fn summary_contract_no_json_leak_in_ui_content() {
         ("zocli.auth.status", json!({})),
         ("zocli.update.check", json!({})),
     ];
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_account(temp.path());
 
     for (tool_name, args) in &tools {
         let input = [
@@ -4036,6 +4038,7 @@ fn summary_contract_no_json_leak_in_ui_content() {
         .concat();
 
         let output = zocli()
+            .env("ZOCLI_CONFIG_DIR", temp.path())
             .args(["mcp"])
             .write_stdin(input)
             .assert()
@@ -4074,6 +4077,8 @@ fn summary_contract_max_length_enforced() {
         ("zocli.auth.status", json!({})),
         ("zocli.update.check", json!({})),
     ];
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_account(temp.path());
 
     for (tool_name, args) in &tools {
         let input = [
@@ -4088,6 +4093,7 @@ fn summary_contract_max_length_enforced() {
         .concat();
 
         let output = zocli()
+            .env("ZOCLI_CONFIG_DIR", temp.path())
             .args(["mcp"])
             .write_stdin(input)
             .assert()
@@ -4119,6 +4125,8 @@ fn summary_contract_non_ui_preserves_json() {
         ("zocli.auth.status", json!({})),
         ("zocli.update.check", json!({})),
     ];
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_account(temp.path());
 
     for (tool_name, args) in &tools {
         let input = [
@@ -4133,6 +4141,7 @@ fn summary_contract_non_ui_preserves_json() {
         .concat();
 
         let output = zocli()
+            .env("ZOCLI_CONFIG_DIR", temp.path())
             .args(["mcp"])
             .write_stdin(input)
             .assert()
