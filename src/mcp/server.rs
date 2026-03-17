@@ -1541,8 +1541,7 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
         map.insert("schemaVersion".to_string(), json!("1.0"));
     }
 
-    let text = serde_json::to_string_pretty(&structured)
-        .map_err(|err| ZocliError::Serialization(err.to_string()))?;
+    let text = render_tool_content(name, &structured, ui_enabled)?;
 
     let mut response = Map::new();
     response.insert("structuredContent".to_string(), structured);
@@ -2862,8 +2861,7 @@ fn roots_tool_response(roots: Vec<Value>, ui_enabled: bool) -> Result<Value> {
         "roots": roots,
         "schemaVersion": "1.0",
     });
-    let text = serde_json::to_string_pretty(&structured)
-        .map_err(|err| ZocliError::Serialization(err.to_string()))?;
+    let text = render_roots_content(&structured, ui_enabled)?;
 
     let mut response = Map::new();
     response.insert("structuredContent".to_string(), structured);
@@ -2886,6 +2884,218 @@ fn roots_tool_response(roots: Vec<Value>, ui_enabled: bool) -> Result<Value> {
         );
     }
     Ok(Value::Object(response))
+}
+
+fn render_tool_content(tool_name: &str, structured: &Value, ui_enabled: bool) -> Result<String> {
+    if !ui_enabled {
+        return serde_json::to_string_pretty(structured)
+            .map_err(|err| ZocliError::Serialization(err.to_string()));
+    }
+
+    Ok(match tool_name {
+        "zocli.app.snapshot" => {
+            let account_count = structured
+                .get("accountCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let current = structured
+                .get("currentAccount")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            format!(
+                "zocli snapshot ready. {account_count} account(s). Current account: {current}. Open the app surface for details."
+            )
+        }
+        "zocli.update.check" => {
+            let current = structured
+                .get("currentVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let target = structured
+                .get("targetVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            match structured
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "update_available" => {
+                    format!("Update available: {current} -> {target}. Open the app or run `zocli update`.")
+                }
+                "already_up_to_date" => format!("zocli is up to date ({current})."),
+                status => format!("Update check status: {status}. Current: {current}. Target: {target}."),
+            }
+        }
+        "zocli.account.list" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} configured account(s). Open the account app for details.")
+        }
+        "zocli.account.current" => {
+            let account = structured
+                .get("account")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let email = structured
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("Current account: {account} ({email}).")
+        }
+        "zocli.auth.status" => {
+            let account = structured
+                .get("account")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let state = structured
+                .get("auth")
+                .and_then(|auth| auth.get("credential_state"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let guidance = structured
+                .get("guidance")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("Auth status for {account}: {state}. {guidance}")
+        }
+        "zocli.mail.folders" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} mail folder(s) loaded. Open the mail app for details.")
+        }
+        "zocli.mail.list" | "zocli.mail.search" => {
+            let items = structured.get("items").and_then(Value::as_array);
+            let count = items.map_or(0, |items| items.len());
+            let newest_subject = items
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("subject"))
+                .and_then(Value::as_str)
+                .filter(|subject| !subject.trim().is_empty());
+            match newest_subject {
+                Some(subject) => {
+                    format!("{count} message(s) loaded. Latest subject: {subject}")
+                }
+                None => format!("{count} message(s) loaded. Open the mail app for details."),
+            }
+        }
+        "zocli.mail.read" => {
+            let item = structured.get("item");
+            let subject = item
+                .and_then(|item| item.get("subject"))
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled");
+            let sender = item
+                .and_then(|item| item.get("sender"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown sender");
+            let attachments = item
+                .and_then(|item| item.get("attachments"))
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            if attachments > 0 {
+                format!(
+                    "Email \"{subject}\" from {sender}. {attachments} attachment(s). Open the mail app for the full message."
+                )
+            } else {
+                format!("Email \"{subject}\" from {sender}. Open the mail app for the full message.")
+            }
+        }
+        "zocli.mail.send" | "zocli.mail.reply" | "zocli.mail.forward" => {
+            let id = structured
+                .get("message_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("Mail action completed. Message id: {id}.")
+        }
+        "zocli.mail.attachment_export" => {
+            let filename = structured
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or("attachment");
+            format!("Attachment ready: {filename}. Open the mail app for details.")
+        }
+        "zocli.calendar.calendars" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} calendar(s) loaded. Open the calendar app for details.")
+        }
+        "zocli.calendar.events" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} calendar event(s) loaded. Open the calendar app for details.")
+        }
+        "zocli.calendar.create" => {
+            let summary = structured
+                .get("event")
+                .and_then(|event| event.get("summary"))
+                .and_then(Value::as_str)
+                .unwrap_or("event");
+            format!("Calendar event created: {summary}.")
+        }
+        "zocli.calendar.delete" => {
+            let uid = structured
+                .get("deleted_event")
+                .and_then(|event| event.get("uid"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("Calendar event deleted: {uid}.")
+        }
+        "zocli.drive.teams" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} WorkDrive team(s) loaded. Open the drive app for details.")
+        }
+        "zocli.drive.list" => {
+            let count = structured
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len());
+            format!("{count} WorkDrive item(s) loaded. Open the drive app for details.")
+        }
+        "zocli.drive.upload" => {
+            let name = structured
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            format!("Uploaded {name}.")
+        }
+        "zocli.drive.download" => {
+            let output = structured
+                .get("output_path")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            format!("Downloaded file to {output}.")
+        }
+        "zocli.roots.list" => render_roots_summary(structured),
+        _ => "Action completed. Open the app surface for details.".to_string(),
+    })
+}
+
+fn render_roots_content(structured: &Value, ui_enabled: bool) -> Result<String> {
+    if !ui_enabled {
+        return serde_json::to_string_pretty(structured)
+            .map_err(|err| ZocliError::Serialization(err.to_string()));
+    }
+    Ok(render_roots_summary(structured))
+}
+
+fn render_roots_summary(structured: &Value) -> String {
+    let count = structured
+        .get("roots")
+        .and_then(Value::as_array)
+        .map_or(0, |roots| roots.len());
+    format!("{count} workspace root(s) loaded.")
 }
 
 fn parse_roots_list_response(message: &Value) -> Result<Vec<Value>> {

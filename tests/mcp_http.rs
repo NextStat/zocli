@@ -109,6 +109,13 @@ fn client() -> Client {
         .expect("http client")
 }
 
+fn streaming_client() -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("streaming http client")
+}
+
 fn post_json(
     client: &Client,
     url: &str,
@@ -1650,6 +1657,7 @@ credential_ref = "store:oauth"
     let config_dir = temp.path().display().to_string();
     let server = TestHttpServer::spawn_with_envs(&[("ZOCLI_CONFIG_DIR", &config_dir)]);
     let client = client();
+    let sse_client = streaming_client();
 
     let initialize = post_json(
         &client,
@@ -1681,7 +1689,7 @@ credential_ref = "store:oauth"
         .expect("header string")
         .to_string();
 
-    let sse = open_sse(&client, &server.url(), &session_id);
+    let sse = open_sse(&sse_client, &server.url(), &session_id);
     assert!(sse.status().is_success());
     let mut reader = BufReader::new(sse);
 

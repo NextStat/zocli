@@ -2536,6 +2536,7 @@ credential_ref = "store:oauth"
 
     let responses = parse_responses(&output);
     let result = &responses[1]["result"];
+    let structured = &result["structuredContent"];
     let content = result["content"].as_array().expect("content array");
     let text = content[0]["text"].as_str().unwrap_or("");
 
@@ -2546,8 +2547,7 @@ credential_ref = "store:oauth"
     );
 
     // Must include guidance
-    let parsed: Value = serde_json::from_str(text).expect("auth result json");
-    let guidance = parsed["guidance"].as_str().unwrap_or("");
+    let guidance = structured["guidance"].as_str().unwrap_or("");
     assert!(
         !guidance.is_empty(),
         "auth_status must include guidance for store_missing"
@@ -2556,6 +2556,7 @@ credential_ref = "store:oauth"
         guidance.contains("login") || guidance.contains("zocli login"),
         "guidance for store_missing must mention login: {guidance}"
     );
+    assert_eq!(structured["auth"]["credential_state"], "store_missing");
 }
 
 #[test]
@@ -2615,16 +2616,13 @@ api_domain = "https://www.zohoapis.com"
 
     let responses = parse_responses(&output);
     let result = &responses[1]["result"];
-    let content = result["content"].as_array().expect("content array");
-    let text = content[0]["text"].as_str().unwrap_or("");
-    let parsed: Value = serde_json::from_str(text).expect("auth result json");
-
+    let structured = &result["structuredContent"];
     assert_eq!(
-        parsed["auth"]["credential_state"], "store_expired",
+        structured["auth"]["credential_state"], "store_expired",
         "expired token must show store_expired"
     );
 
-    let guidance = parsed["guidance"].as_str().unwrap_or("");
+    let guidance = structured["guidance"].as_str().unwrap_or("");
     assert!(
         !guidance.is_empty(),
         "auth_status must include guidance for expired token"
@@ -2691,24 +2689,28 @@ api_domain = "https://www.zohoapis.com"
 
     let responses = parse_responses(&output);
     let result = &responses[1]["result"];
+    let structured = &result["structuredContent"];
     let content = result["content"].as_array().expect("content array");
     let text = content[0]["text"].as_str().unwrap_or("");
-    let parsed: Value = serde_json::from_str(text).expect("auth result json");
 
-    assert_eq!(parsed["auth"]["credential_state"], "store_present");
-    assert_eq!(parsed["account"], "valid");
-    assert_eq!(parsed["email"], "valid@zoho.com");
-    assert_eq!(parsed["datacenter"], "com");
+    assert_eq!(structured["auth"]["credential_state"], "store_present");
+    assert_eq!(structured["account"], "valid");
+    assert_eq!(structured["email"], "valid@zoho.com");
+    assert_eq!(structured["datacenter"], "com");
 
     // Scopes must be present
-    let scopes = parsed["auth"]["scope"].as_array().expect("scope array");
+    let scopes = structured["auth"]["scope"].as_array().expect("scope array");
     assert!(scopes.len() >= 3, "valid auth must expose scopes");
 
     // Guidance for valid auth — should confirm everything is ok
-    let guidance = parsed["guidance"].as_str().unwrap_or("");
+    let guidance = structured["guidance"].as_str().unwrap_or("");
     assert!(
         !guidance.is_empty(),
         "auth_status must include guidance even when valid"
+    );
+    assert!(
+        text.contains("store_present"),
+        "ui-enabled summary should mention store_present: {text}"
     );
 }
 
@@ -2771,17 +2773,152 @@ api_domain = "https://www.zohoapis.com"
 
     let responses = parse_responses(&output);
     let result = &responses[1]["result"];
-    let content = result["content"].as_array().expect("content array");
-    let text = content[0]["text"].as_str().unwrap_or("");
-    let parsed: Value = serde_json::from_str(text).expect("auth result json");
 
     // Must include authDiscovery when HTTP auth is configured
-    let discovery = &parsed["authDiscovery"];
+    let discovery = &result["structuredContent"]["authDiscovery"];
     assert_eq!(discovery["enabled"], true);
     assert_eq!(
         discovery["authorizationServers"][0],
         "https://auth.example.test"
     );
+}
+
+#[test]
+fn mcp_stdio_ui_tool_results_use_human_summary_and_structured_content() {
+    let temp = tempdir().expect("tempdir");
+    write_accounts_file(
+        temp.path(),
+        r#"
+version = 1
+
+[accounts.valid]
+email = "valid@zoho.com"
+default = true
+datacenter = "com"
+account_id = "77777"
+client_id = "client-valid"
+credential_ref = "store:oauth"
+"#,
+    );
+    write_credentials_file(
+        temp.path(),
+        r#"
+version = 1
+
+[accounts.valid.services.oauth]
+kind = "oauth_pkce"
+access_token = "valid-token"
+token_type = "Bearer"
+expires_at_epoch_secs = 4102444800
+scope = ["ZohoMail.messages.ALL", "ZohoCalendar.calendar.ALL"]
+client_id = "client-valid"
+api_domain = "https://www.zohoapis.com"
+"#,
+    );
+
+    let input = [
+        initialize_request(true),
+        mcp_request(
+            2,
+            "tools/call",
+            json!({
+                "name": "zocli.auth.status",
+                "arguments": { "account": "valid" }
+            }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .env("ZOCLI_CONFIG_DIR", temp.path())
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let result = &responses[1]["result"];
+    let text = result["content"][0]["text"].as_str().expect("summary text");
+
+    assert!(
+        text.starts_with("Auth status for valid: store_present."),
+        "ui-enabled content should be a human summary, got: {text}"
+    );
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "ui-enabled content must not be raw JSON: {text}"
+    );
+    assert_eq!(result["structuredContent"]["auth"]["credential_state"], "store_present");
+    assert_eq!(result["_meta"]["ui"]["resourceUri"], "ui://zocli/auth");
+}
+
+#[test]
+fn mcp_stdio_non_ui_tool_results_keep_raw_json_content() {
+    let temp = tempdir().expect("tempdir");
+    write_accounts_file(
+        temp.path(),
+        r#"
+version = 1
+
+[accounts.valid]
+email = "valid@zoho.com"
+default = true
+datacenter = "com"
+account_id = "77777"
+client_id = "client-valid"
+credential_ref = "store:oauth"
+"#,
+    );
+    write_credentials_file(
+        temp.path(),
+        r#"
+version = 1
+
+[accounts.valid.services.oauth]
+kind = "oauth_pkce"
+access_token = "valid-token"
+token_type = "Bearer"
+expires_at_epoch_secs = 4102444800
+scope = ["ZohoMail.messages.ALL"]
+client_id = "client-valid"
+api_domain = "https://www.zohoapis.com"
+"#,
+    );
+
+    let input = [
+        initialize_request(false),
+        mcp_request(
+            2,
+            "tools/call",
+            json!({
+                "name": "zocli.auth.status",
+                "arguments": { "account": "valid" }
+            }),
+        ),
+    ]
+    .concat();
+
+    let output = zocli()
+        .env("ZOCLI_CONFIG_DIR", temp.path())
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let result = &responses[1]["result"];
+    let text = result["content"][0]["text"].as_str().expect("json text");
+    let parsed: Value = serde_json::from_str(text).expect("non-ui content json");
+
+    assert_eq!(parsed["auth"]["credential_state"], "store_present");
+    assert_eq!(parsed, result["structuredContent"]);
+    assert!(result.get("_meta").is_none());
 }
 
 // ── Phase 5: Workflow Parity ─────────────────────────────────

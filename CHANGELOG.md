@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3
+
+### Changed
+
+- MCP Apps tool results now return concise human summaries in `content` for app-capable hosts, while keeping full machine data in `structuredContent`.
+
+### Fixed
+
+- non-UI MCP clients still receive raw JSON tool payloads instead of summary-only text;
+- JSON `resources/read` payloads keep machine-readable `application/json` content instead of app-style summaries;
+- MCP HTTP SSE tests now use a dedicated streaming client timeout, removing flaky notification timeouts from the release gate.
+
 ## 0.2.2
 
 ### Changed
